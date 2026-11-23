@@ -6,3 +6,6 @@ debug.log
 /.workbuddy
 *.tmp.html
 *.tmp.*
+
+# MCP
+.narsil.yaml
