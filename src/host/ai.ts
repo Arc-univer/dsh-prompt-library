@@ -4,8 +4,8 @@
  * 封装 harness 的 LLM 服务（ctx.llm.stream()）：
  * - registerLlm / isAiAvailable：由 host 入口在 llm 服务可用时注入引用；
  * - enrichLearnedPrompt：保存到词库后，在后台调用 AI 生成/完善
- *   标题、标签/分类、摘要/使用说明，并优化改写正文（仅供词库内完善，不回写人格文件）；
- * - polishPromptBody / enrichPromptProfessional：供界面调用的润色与完善。
+ *   标题、标签/分类、摘要/使用说明，并优化改写正文；
+ * - polishPromptBody：供界面调用的润色。
  *
  * 所有 AI 调用都带超时；任何失败都静默降级，绝不阻塞或破坏主流程。
  */
@@ -16,7 +16,6 @@ import { listTags, readGlobalLocale, updatePrompt } from "./store.js";
 import { parseRefineResult, type AiRefineResult } from "./refine.js";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { buildSoulBoundary, readSoulDoc } from "./character.js";
 import { logDir } from "./paths.js";
 
 /** 单次 AI 完善调用的超时（毫秒）。 */
@@ -380,11 +379,11 @@ async function resolveCandidates(
   return candidates;
 }
 
-/** 组装 system prompt：引导 AI 依据标签库整理提示词（人格由外部 withSoulSystem 注入）。 */
-async function systemPrompt(existingTags: string[], existingVars: string[]): Promise<string> {
+/** 组装 system prompt：引导 AI 依据标签库整理提示词。 */
+function systemPrompt(existingTags: string[], existingVars: string[]): string {
   // 标签库：优先复用已有标签，避免重复创建
   const tagLib = existingTags.length ? existingTags.join("、") : "（暂无）";
-  const system = [
+  return [
     "你是一名词库整理助手，帮助用户把原始输入整理成高质量、可复用的提示词。",
     "",
     "【标签库】以下是当前已有的标签，请优先复用最贴合的一个，避免重复创建：",
@@ -405,7 +404,6 @@ async function systemPrompt(existingTags: string[], existingVars: string[]): Pro
       : []),
     "- 若正文某处内容会因使用场景而变化（如角色、对象、主题、风格、细节等），可在那处新增命名清晰、贴合语境的 {{变量名}} 占位符，提升提示词可复用性；没有这种需求时不要画蛇添足；",
   ].join("\n");
-  return withSoulSystem(system);
 }
 
 /** 组装 user 消息：原始提示词正文 + 候选标签 + 已有模板变量。 */
@@ -416,22 +414,6 @@ function userMessage(rawBody: string, tag?: string, existingVars?: string[]): st
     lines.push("", `正文已有模板变量（{{}} 内为变量名，运行时替换，必须原样保留）：${existingVars.join("、")}`);
   }
   return lines.join("\n");
-}
-
-/**
- * 把人格正文注入 AI 的 system prompt，让 AI 遵守用户自定义的人设/语气/工作规范。
- * 读取失败时静默忽略，不影响本次调用。
- *
- * 调用方若已用 readSoulDoc() 读过 soul，应直接传入复用；soul 为空时回退到自行读取。
- */
-async function withSoulSystem(system: string, soul?: string): Promise<string> {
-  try {
-    const boundary = buildSoulBoundary(soul ?? (await readSoulDoc()));
-    if (!boundary) return system;
-    return [system, "", "# SOUL · 人格", boundary].join("\n");
-  } catch {
-    return system;
-  }
 }
 
 /**
@@ -521,7 +503,7 @@ function parseJson(text: string): AiRefineResult | undefined {
 
 /**
  * 后台完善一条自动学习到的提示词：
- * 1. 依据标签库与人格注入调用 harness LLM 生成标题/标签/摘要/改写正文；
+ * 1. 依据标签库调用 harness LLM 生成标题/标签/摘要/改写正文；
  * 2. 把结果写回词库（标记 aiRefined，改写时保留 sourceBody）。
  *
  * 任何失败都静默返回，不影响主流程。
@@ -567,7 +549,7 @@ async function enrichLearnedPromptInner(
   const text = await collectTextWithFallback(
     llm,
     candidates,
-    await systemPrompt(existingTags, existingVars),
+    systemPrompt(existingTags, existingVars),
     userMessage(prompt.body, prompt.tags?.[0], existingVars),
   );
   if (!text) return;
@@ -633,49 +615,6 @@ function stripAiFiller(text: string): string {
 }
 
 /**
- * AI 专业完善一段提示词正文（只返回结果，不写回词库）。
- *
- * 与「润色」（polishPromptBody：换得更简洁精炼、保持原长度甚至更短）完全相反：
- * 此处扩写完善 —— 在保留原意与核心要求的前提下，补充方法、步骤、约束与自查要点，
- * 用清晰结构组织，使提示词更全面、更专业、更可执行。
- * 与润色一样不特殊处理 {{}} 模板变量，交由 AI 正常处理。
- * 供界面「AI 完善」按钮调用，把完善后的正文返回填入草稿。
- * 无可用 LLM / 无法解析路由 / 调用失败时返回 undefined。
- */
-export async function enrichPromptProfessional(
-  body: string,
-  settings: PluginSettings,
-): Promise<string | undefined> {
-  logAI(aiLogCopy().enrichStartBody(body.length));
-  if (!llm) {
-    logAI(aiLogCopy().enrichSkipNoLlm);
-    return undefined;
-  }
-  const candidates = await resolveCandidates(llm, settings);
-  if (candidates.length === 0) return undefined;
-  const system = [
-    "你是一名专业的提示词完善助手，擅长把用户的提示词完善成更全面、更专业、结构完整、可直接执行的高质量作品。",
-    "",
-    "要求（与「润色」相反：润色是把内容换得更简洁精炼；此处是扩写完善，使其更完整专业）：",
-    "- 只完善提示词正文本身，不要涉及标题、标签、分类；",
-    "- 保留原意与核心要求，在此基础上扩写完善：补充必要的方法、步骤、约束、边界与自查要点，使提示词更全面、更专业、更可执行；",
-    "- 用清晰的结构组织内容（分步骤 / 分要点 / 分阶段），方便使用者逐项落实；",
-    "- 使用专业、精准、规范的表达，避免含糊与口语化；",
-    "- 不要刻意缩短或压缩内容，适当扩充细节以提升完成度；",
-    "- 直接输出完善后的提示词正文，不要任何解释或 Markdown 代码块。",
-  ].join("\n");
-  const text = await collectTextWithFallback(
-    llm,
-    candidates,
-    await withSoulSystem(system),
-    `请把以下提示词完善成更专业、更全面、结构完整的版本：\n\n${body}`,
-  );
-  if (!text) return undefined;
-  logAI(aiLogCopy().enrichDoneBody(text.length));
-  return stripAiFiller(text);
-}
-
-/**
  * AI 润色一段提示词正文（只返回结果，不写回词库；只润色内容本身）。
  * 保持原意与关键细节，优化表达，使其更清晰通用、可直接复用。
  * 无可用 LLM / 无法解析路由 / 调用失败时返回 undefined。
@@ -722,7 +661,7 @@ export async function polishPromptBody(
   const text = await collectTextWithFallback(
     llm,
     candidates,
-    await withSoulSystem(system),
+    system,
     content,
   );
   if (!text) return undefined;
@@ -782,7 +721,7 @@ export async function polishPromptBodyWithSummary(
   const text = await collectTextWithFallback(
     llm,
     candidates,
-    await withSoulSystem(summarySystem),
+    summarySystem,
     `请为以下提示词生成用途摘要：\n\n${polished}`,
   );
   if (!text) return { polished };
@@ -836,7 +775,7 @@ export async function generateIntro(
   const text = await collectTextWithFallback(
     llm,
     candidates,
-    await withSoulSystem(system),
+    system,
     content,
   );
   if (!text) return undefined;
@@ -1026,7 +965,7 @@ export async function generateSkillDescriptor(
     "以下是提示词正文（{{变量名}} 为模板变量，必须原样保留）：",
     prompt.body,
   ].join("\n");
-  const sysText = await withSoulSystem(system);
+  const sysText = system;
   for (let attempt = 0; attempt < 3; attempt++) {
     const text = await collectTextWithFallback(llm, candidates, sysText, content);
     if (!text) {
@@ -1057,13 +996,13 @@ export interface DraftGenerateResult {
 }
 
 /**
- * 依据「标题 + 用户输入」用 AI 生成一段技能（skill）或人格（soul）正文草稿。
- * 供人格管理 / 技能管理编辑区「AI 生成」按钮使用：仅生成文本返回，不落盘、不写回。
+ * 依据「标题 + 用户输入」用 AI 生成一段技能（skill）正文草稿。
+ * 供技能管理编辑区「AI 生成」按钮使用：仅生成文本返回，不落盘、不写回。
  * 返回 { content } 表示成功；{ fail } 表示失败并给出原因码（前端展示准确提示）。
  * 模型返回空文本多为瞬时故障，自动重试最多 3 次后再判定失败。
  */
 export async function generateDraft(
-  kind: "soul" | "skill",
+  kind: "skill",
   title: string,
   input: string,
   settings: PluginSettings,
@@ -1078,46 +1017,26 @@ export async function generateDraft(
   if (candidates.length === 0) return { fail: "route" };
   const enMode = lang === "en";
   const system = enMode
-    ? kind === "soul"
-      ? [
-          "You are an expert at writing a SOUL.md persona for an AI assistant. Based on the given persona name and any draft notes, write a complete, well-structured persona definition.",
-          "",
-          "Requirements:",
-          "- Write the full SOUL.md content in English, with clear sections (identity, tone, working rules) using Markdown headings;",
-          "- Keep it practical and warm, matching the persona's purpose; avoid clichés;",
-          "- Output only the SOUL.md content — no extra explanation, no code fence.",
-        ].join("\n")
-      : [
-          "You are an expert at writing a DSH skill (SKILL.md) instruction for an AI assistant. Based on the given skill title and any draft notes, write a complete, actionable skill definition.",
-          "",
-          "Requirements:",
-          "- Write the full skill content in English, starting with a short summary, then concrete instructions the assistant should follow, using Markdown;",
-          "- Keep it specific, actionable and easy to reuse; avoid vagueness;",
-          "- Output only the skill content — no extra explanation, no code fence.",
-        ].join("\n")
-    : kind === "soul"
-      ? [
-          "你是一名擅长编写 AI 人格（SOUL.md）的专家。根据用户给的人格名称与草稿，生成一段完整、结构清晰的人格设定。",
-          "",
-          "要求：",
-          "- 用中文写完整的 SOUL.md 内容，用 Markdown 标题分节（身份设定 / 语气风格 / 工作规范等）；",
-          "- 内容务实、有温度，贴合人格用途，避免套话空话；",
-          "- 只输出 SOUL.md 正文，不要任何解释，不要 Markdown 代码块。",
-        ].join("\n")
-      : [
-          "你是一名擅长编写 DSH 技能（SKILL.md）指令的专家。根据用户给的技能标题与草稿，生成一段完整、可直接复用的技能定义。",
-          "",
-          "要求：",
-          "- 用中文写完整技能正文，先写一段简短用途说明，再写具体、可执行的指令（用 Markdown 组织）；",
-          "- 内容具体、可落地、便于复用，避免空泛；",
-          "- 只输出技能正文，不要任何解释，不要 Markdown 代码块。",
-        ].join("\n");
+    ? [
+        "You are an expert at writing a DSH skill (SKILL.md) instruction for an AI assistant. Based on the given skill title and any draft notes, write a complete, actionable skill definition.",
+        "",
+        "Requirements:",
+        "- Write the full skill content in English, starting with a short summary, then concrete instructions the assistant should follow, using Markdown;",
+        "- Keep it specific, actionable and easy to reuse; avoid vagueness;",
+        "- Output only the skill content — no extra explanation, no code fence.",
+      ].join("\n")
+    : [
+        "你是一名擅长编写 DSH 技能（SKILL.md）指令的专家。根据用户给的技能标题与草稿，生成一段完整、可直接复用的技能定义。",
+        "",
+        "要求：",
+        "- 用中文写完整技能正文，先写一段简短用途说明，再写具体、可执行的指令（用 Markdown 组织）；",
+        "- 内容具体、可落地、便于复用，避免空泛；",
+        "- 只输出技能正文，不要任何解释，不要 Markdown 代码块。",
+      ].join("\n");
   const content = [
     `标题：${title}`,
     input && input.trim() ? `以下是已有的草稿 / 补充要求（可在此基础完善）：\n${input.trim()}` : "（暂无草稿，请根据标题展开完整内容）",
   ].join("\n\n");
-  // 注意：这里不使用 withSoulSystem 注入当前人格，保证生成内容只跟「标题 + 输入」相关，
-  // 不携带其它人格 / 技能等无关上下文。
   const sysText = system;
   for (let attempt = 0; attempt < 3; attempt++) {
     const text = await collectTextWithFallback(llm, candidates, sysText, content);
@@ -1128,7 +1047,7 @@ export async function generateDraft(
     }
     // 清理可能的代码块包裹后直接作为草稿返回
     const cleaned = text
-      .replace(/^```(?:md|markdown|soul|skill)?\s*/i, "")
+      .replace(/^```(?:md|markdown|skill)?\s*/i, "")
       .replace(/\s*```$/, "")
       .trim();
     if (!cleaned) return { fail: "empty" };

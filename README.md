@@ -4,21 +4,31 @@
 
 </div>
 
+> **Fork Notice**
+>
+> This repository is a fork of [master1Sun/dsh-prompt-library](https://github.com/master1Sun/dsh-prompt-library).
+>
+> **Changes in this fork:**
+> - **Persona (SOUL) feature removed entirely**: the upstream plugin injected its default "prompt library assistant" persona into **every** conversation's system prompt (shadowing the host identity slot), polluting all chats. Persona injection, storage, bindings and management UI have been removed; conversations keep the host's native identity again.
+> - **Dead code with no references removed**: `PersonaManagerModal`, `PromptInjectPanel`, `HarnessSkillPanel`, `SubPanelModal`, `enrichPromptProfessional`.
+> - AI polish and all other AI capabilities are unchanged; the only system-prompt injection left is skill injection (explicitly bound by the user).
+
 # dsh-prompt-library
 
-DSH (DeepSeek Harness) prompt library plugin: provides **prompt management**, **AI polish** and **persona customization** in the chat bar, helping you accumulate, reuse and continuously improve prompts.
+DSH (DeepSeek Harness) prompt library plugin: provides **prompt management** and **AI polish** in the chat bar, helping you accumulate, reuse and continuously improve prompts.
 
 ## Key Features
 
 ### Prompt Library
 
 - Manage frequently-used prompts (title + body + tags), with search, sorting, tag grouping and usage-count statistics
-- Entry 1: the "Library" menu button above the settings button in the sidebar opens a centered panel whose navigation reaches Data Management, Import/Export, Tags, Recycle Bin, Personas, and Skills
+- Entry 1: the "Library" menu button above the settings button in the sidebar opens a centered panel whose navigation reaches Data Management, Import/Export, Tags and Recycle Bin
 - Entry 2: the prompt-library button beside the chat input opens recent/frequent prompts with one click
 - **Insert**: appends to the existing content in the input box
 - **Overwrite**: directly replaces the whole draft with this prompt
 - **Insert & Send**: fills in template variables and sends with one click (uses the variable dialog when it contains `{{}}`); outside `#` scenarios it is only available when the draft is empty, avoiding accidentally carrying existing content; when triggered by `#`, the trigger word is filtered out while the preceding text is kept and sent along
 - Type `#` to quickly trigger selection with real-time filtering
+- When the input is empty, matching prompts are recommended above the input based on recent chat context; click to insert into the draft
 - The bottom shows the total number of tags and prompts in real time
 
 ### Generate Skills
@@ -31,19 +41,6 @@ DSH (DeepSeek Harness) prompt library plugin: provides **prompt management**, **
 ### AI Polish
 
 - The "AI Polish" button in the chat bar optimizes text with one click, then replaces it back into the input box with one click
-- The polishing process follows the constraints of the persona settings
-
-### Persona (AI read-only reference)
-
-Persona bodies live in the database (`prompts.db`: default persona in the meta table, custom ones in the personas table), constraining every AI call and the session they apply to, forming a stable assistant persona. A complete default template is seeded automatically when missing; its content is **manually maintained by the user**, and AI only reads it without modifying it on its own. Multiple personas (SOUL) can be created and bound per workspace/project — new sessions opened under a matched path automatically adopt that persona.
-
-
-| Storage | Meaning | Purpose                                   |
-| ------- | ------- | ----------------------------------------- |
-| SOUL    | Persona | Identity, tone/personality, working rules |
-
-- When the input is empty, matching prompts are recommended above the input based on recent chat context; click to insert into the draft
-- The persona is the user's explicit configuration (including the default template), and AI follows its personality, tone and working rules accordingly
 
 ### Settings
 
@@ -55,11 +52,10 @@ The library uses **SQLite** (`node:sqlite`); all other configs and logs are stor
 
 ```
 ~/.dsh/prompt-library/
-├── db/prompts.db      # prompt library, personas & bindings (SQLite)
+├── db/prompts.db      # prompt library & bindings (SQLite)
 ├── settings.json      # plugin settings (prompt-library namespace)
-├── log/
-│   └── ai-YYYY-MM-DD.log   # AI diagnostic logs (per-day files)
-└── character/         # (legacy, migration read-only; personas now live in the database)
+└── log/
+    └── ai-YYYY-MM-DD.log   # AI diagnostic logs (per-day files)
 ```
 
 ## Installation

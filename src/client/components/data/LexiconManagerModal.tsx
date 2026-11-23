@@ -1,7 +1,7 @@
 /**
  * 数据管理弹窗 — 词库助手右键菜单「数据管理」入口。
  *
- * 左右分栏（与导入导出 / 人格管理一致的布局）：
+ * 左右分栏（与导入导出一致的布局）：
  * - 左侧列表：词库提示词列表，顶部固定标题与「新建」按钮；
  * - 右侧窗口：展示所选提示词的完整详情（标题 / 标签 / AI 摘要 / 正文 / 统计），并可进入编辑。
  * 新建 / 编辑共用右侧的表单（标题 + 标签单选 + 正文），保存后刷新列表。
@@ -106,7 +106,7 @@ export function LexiconManagerModal(props: {
   const [draft, setDraft] = useState<Draft>({ title: "", body: "", tag: "" });
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<Msg | null>(null);
-  // 操作反馈出现后 2.6 秒自动清除（与人格/技能管理一致）
+  // 操作反馈出现后 2.6 秒自动清除（与导入导出模块一致）
   useEffect(() => {
     if (!msg) return;
     const timer = setTimeout(() => setMsg(null), 2600);
@@ -1428,7 +1428,7 @@ export function LexiconManagerModal(props: {
           {msg?.text ?? ""}
         </div>
 
-        {/* 主体：左右分栏（左列列表 / 右列预览编辑）——与人格管理一致的面板比例 */}
+        {/* 主体：左右分栏（左列列表 / 右列预览编辑）——与导入导出一致的面板比例 */}
         <div
           style={{
             flex: 1,

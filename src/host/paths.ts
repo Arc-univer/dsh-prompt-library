@@ -3,7 +3,7 @@
  *
  * 目标结构（把项目内所有数据文件集中到单一目录，便于管理）：
  *   ~/.dsh/prompt-library/
- *   ├── db/prompts.db                  # 词库主存储（SQLite），含人格 / 技能绑定 / meta
+ *   ├── db/prompts.db                  # 词库主存储（SQLite），含技能绑定 / meta
  *   └── log/                           # AI 调用诊断日志（按系统时区日期分文件）
  *       └── ai-YYYY-MM-DD.log
  *
@@ -71,11 +71,6 @@ export function logDir(): string {
 }
 
 // ── 历史数据迁移读取（当前存储均已迁入数据库）──────────────────────────────
-
-/** 旧版默认人格文件路径：~/.dsh/prompt-library/character/SOUL.md（迁移读取用，当前存于 meta 表） */
-export function soulPath(): string {
-  return join(dataDir(), "character", "SOUL.md");
-}
 
 /** 旧版某条会话级技能的 MD 文件路径：~/.dsh/prompt-library/session-prompts/<id>.md（迁移读取用） */
 export function sessionPromptPath(id: string): string {

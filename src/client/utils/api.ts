@@ -5,19 +5,15 @@
  * 在非 ok 信封或传输失败时抛出异常。
  */
 import type {
-  PersonaBinding,
-  PersonaView,
   PluginSettings,
   Prompt,
   PromptInput,
   PromptPatch,
-  ScopeNode,
   SessionPrompt,
   TrashItem,
 } from "../../types.js";
 
 const BASE = "/api/prompt-library/prompts";
-const PERSONAS_BASE = "/api/prompt-library/personas";
 const SESSION_PROMPTS_BASE = "/api/prompt-library/session-prompts";
 
 interface ApiResponse<T> {
@@ -348,9 +344,9 @@ export function polishPrompt(
 /** AI 生成失败原因码（与 host 端 DraftGenerateFail 保持一致）。 */
 export type DraftGenerateFail = "no-llm" | "route" | "empty";
 
-/** 依据「标题 + 已有内容」用 AI 生成技能 / 人格正文草稿（人格管理 / 技能管理「AI 生成」按钮用）。 */
+/** 依据「标题 + 已有内容」用 AI 生成技能正文草稿（技能管理「AI 生成」按钮用）。 */
 export function generateDraft(
-  kind: "soul" | "skill",
+  kind: "skill",
   title: string,
   input: string,
   lang?: "zh" | "en",
@@ -398,51 +394,6 @@ export function getSettings(): Promise<PluginSettings> {
 /** 更新插件设置（部分更新）。 */
 export function updateSettings(patch: Partial<PluginSettings>): Promise<PluginSettings> {
   return send<PluginSettings>("PUT", SETTINGS_BASE, patch);
-}
-
-// ── 人格管理（CRUD + 工作区/项目/会话绑定）───────────────────────────────
-
-/** 列出全部人格（含内置默认人格，排最前）。 */
-export function listPersonas(): Promise<PersonaView[]> {
-  return send<PersonaView[]>("GET", PERSONAS_BASE);
-}
-
-/** 新建自定义人格（自动写入默认 SOUL 文件），返回完整视图。 */
-export function createPersona(name: string): Promise<PersonaView> {
-  return send<PersonaView>("POST", PERSONAS_BASE, { name });
-}
-
-/** 更新人格：可改名称 / 启用状态 / SOUL 正文（默认人格的名称与正文只读，更新会被 host 拒绝）。 */
-export function updatePersona(
-  id: string,
-  patch: { name?: string; enabled?: boolean; content?: string },
-): Promise<PersonaView> {
-  return send<PersonaView>("PUT", `${PERSONAS_BASE}/${encodeURIComponent(id)}`, patch);
-}
-
-/** 删除自定义人格（删除记录、会话绑定与 SOUL 文件；默认人格不可删）。 */
-export function deletePersona(id: string): Promise<{ id: string }> {
-  return send<{ id: string }>("DELETE", `${PERSONAS_BASE}/${encodeURIComponent(id)}`);
-}
-
-/** 读取工作区/项目树（节点自带精确绑定的人格 id）。 */
-export function listScopeTree(): Promise<ScopeNode[]> {
-  return send<ScopeNode[]>("GET", `${PERSONAS_BASE}/scopes`);
-}
-
-/** 读取「工作区 → 项目 → 会话」树（工作区/项目节点下挂会话，会话自带人格与技能绑定）。 */
-export function listSessionScopeTree(): Promise<ScopeNode[]> {
-  return send<ScopeNode[]>("GET", `${PERSONAS_BASE}/scopes/sessions`);
-}
-
-/** 读取某路径精确绑定的自定义人格 id（无绑定返回空串，表示使用默认人格）。 */
-export function getPersonaBinding(path: string): Promise<PersonaBinding> {
-  return send<PersonaBinding>("GET", `${PERSONAS_BASE}/scopes/binding?path=${encodeURIComponent(path)}`);
-}
-
-/** 设置某路径绑定的人格（传入 'default'/空串 → 回落默认/上层），返回实际生效的人格 id。 */
-export function setPersonaBinding(path: string, personaId: string): Promise<PersonaBinding> {
-  return send<PersonaBinding>("PUT", `${PERSONAS_BASE}/scopes/binding`, { path, personaId });
 }
 
 // ── 会话级技能与技能注入 ────────────────────────────────────────────────
@@ -496,14 +447,9 @@ export function clearSessionPromptBinding(path: string): Promise<{ cleared: bool
   );
 }
 
-/** 一键清空技能绑定（所有路径 + 会话的技能绑定，人格不受影响）。 */
+/** 一键清空技能绑定（所有路径 + 会话的技能绑定）。 */
 export function clearAllBindings(): Promise<{ cleared: boolean }> {
   return send<{ cleared: boolean }>("DELETE", `${SESSION_PROMPTS_BASE}/bindings/all`);
-}
-
-/** 一键清空人格绑定（所有路径 + 会话的人格绑定，技能不受影响）。 */
-export function clearAllPersonaBindings(): Promise<{ cleared: boolean }> {
-  return send<{ cleared: boolean }>("DELETE", `${PERSONAS_BASE}/scopes/bindings/all`);
 }
 
 /** 读取某会话 scope 临时注入的会话级技能 id 列表。 */
@@ -519,32 +465,6 @@ export function setSessionActivePrompts(scope: string, promptIds: string[]): Pro
   return send<{ promptIds: string[] }>("PUT", `${SESSION_PROMPTS_BASE}/active`, { scope, promptIds });
 }
 
-// ── 会话解析诊断（排查「设了技能却没生效」用）────────────────────────────
-
-/** 会话解析诊断结果（与组装端同一套逻辑）。 */
-export interface ScopeDiag {
-  sessid: string;
-  cwd: string;
-  personaId: string;
-  personaName: string;
-  personaSource: "session" | "path" | "default";
-  promptIds: string[];
-  promptTitles: string[];
-  activeCount: number;
-  checkedPaths: string[];
-}
-
-/** 拉取某会话（省略则取最近活跃）当前的解析命中：人格来源、命中的技能。 */
-export function diagSession(sessid?: string): Promise<ScopeDiag> {
-  const q = sessid ? `?sessid=${encodeURIComponent(sessid)}` : "";
-  return send<ScopeDiag>("GET", `${SESSION_PROMPTS_BASE}/diag${q}`);
-}
-
-/** 设置某会话绑定的自定义人格（传 'default'/空串 → 回落默认/上层），返回实际生效的人格 id。 */
-export function setSessionPersonaBinding(sessionId: string, personaId: string): Promise<{ personaId: string }> {
-  return send<{ personaId: string }>("PUT", `${SESSION_PROMPTS_BASE}/session/persona`, { sessionId, personaId });
-}
-
 /** 设置某会话持久绑定的会话级技能 id 列表（空数组 → 解除该会话的技能绑定）。 */
 export function setSessionPromptBindingForSession(
   sessionId: string,
@@ -553,7 +473,7 @@ export function setSessionPromptBindingForSession(
   return send<{ promptIds: string[] }>("PUT", `${SESSION_PROMPTS_BASE}/session/prompts`, { sessionId, promptIds });
 }
 
-/** 清除某会话的全部持久绑定（人格回落默认、技能不再注入）。 */
+/** 清除某会话的技能绑定（不再注入技能）。 */
 export function clearSessionBinding(sessionId: string): Promise<{ cleared: boolean }> {
   return send<{ cleared: boolean }>(
     "DELETE",

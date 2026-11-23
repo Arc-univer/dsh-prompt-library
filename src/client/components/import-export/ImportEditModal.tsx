@@ -462,7 +462,7 @@ export function ImportEditModal(props: {
           </strong>
           <DialogCloseButton onClick={onClose} label={T("pl.close")} />
         </div>
-        {/* 模块说明（与人格管理 / 技能管理说明框一致） */}
+        {/* 模块说明（与导入导出说明框一致） */}
         <div
           style={{
             marginTop: 10,

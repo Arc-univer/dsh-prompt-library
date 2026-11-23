@@ -38,7 +38,6 @@ import {
   emptyTrash,
   exportPrompts,
   getMetaValue,
-  getPersona,
   getSettings,
   importPrompts,
   listPrompts,
@@ -60,30 +59,14 @@ import {
   getCurrentSessionScope,
   getScopeBoundPromptIds,
   getSessionActivePromptIds,
-  getSessionPromptsByIds,
   listScopePromptBindings,
   listSessionPrompts,
-  resolveSessionPromptBindingIds,
   setScopePromptBinding,
   setSessionActivePrompts,
-  setSessionPersonaBindingForSession,
   setSessionPromptBindingForSession,
   updateSessionPrompt,
 } from "./session-prompts.js";
-import {
-  bindPersonaToScope,
-  createPersonaWithSoul,
-  deletePersonaWithSoul,
-  getPersonaForScopePath,
-  getPersonaForSession,
-  listPersonaViews,
-  listScopeTree,
-  resolvePersonaForPath,
-  resolvePersonaForSession,
-  updatePersonaWithContent,
-} from "./persona-service.js";
-import { clearAllPersonaBindings } from "./session-prompts.js";
-import { getActiveSessionCwd, listSessionRecords, listSessionScopeTree } from "./session-scope.js";
+import { getActiveSessionCwd, listSessionRecords } from "./session-scope.js";
 import { getVersionInfo } from "./update.js";
 import { downloadDir } from "./paths.js";
 
@@ -845,8 +828,8 @@ export function makePromptRoutes(): WebRoute[] {
         return json(res, 200, { ok: true, data: { lines } });
       }
 
-      // POST /ai/draft — 依据「标题 + 已有内容」用 AI 生成技能 / 人格正文草稿
-      // （人格管理 / 技能管理编辑区「AI 生成」按钮：只返回文本，不落盘、不写回）
+      // POST /ai/draft — 依据「标题 + 已有内容」用 AI 生成技能正文草稿
+      // （技能管理编辑区「AI 生成」按钮：只返回文本，不落盘、不写回）
       if (method === "POST" && tail === "/ai/draft") {
         const raw = await readJsonBody(req);
         if (typeof raw !== "object" || raw === null) {
@@ -858,8 +841,8 @@ export function makePromptRoutes(): WebRoute[] {
           input?: unknown;
           lang?: unknown;
         };
-        if ((kind !== "skill" && kind !== "soul") || typeof title !== "string" || !title.trim()) {
-          return json(res, 400, { ok: false, error: "invalid body: {kind: 'soul'|'skill', title: string}" });
+        if (kind !== "skill" || typeof title !== "string" || !title.trim()) {
+          return json(res, 400, { ok: false, error: "invalid body: {kind: 'skill', title: string}" });
         }
         const settings = await getSettings();
         const result = await generateDraft(
@@ -894,98 +877,6 @@ export function makePromptRoutes(): WebRoute[] {
         }
         const settings = await updateSettings(raw as Partial<PluginSettings>);
         return json(res, 200, { ok: true, data: settings });
-      }
-
-      // ── 多人格（自定义 SOUL，按工作区/项目/会话切换）──────────────────────
-
-      // GET /personas — 列出全部人格（含内置默认人格，排最前）
-      if (method === "GET" && segments[0] === "personas" && segments.length === 1) {
-        const data = await listPersonaViews();
-        return json(res, 200, { ok: true, data });
-      }
-
-      // GET /personas/scopes — 列出工作区/项目树（节点自带精确绑定的人格 id）
-      if (method === "GET" && segments[0] === "personas" && segments[1] === "scopes" && segments.length === 2) {
-        return json(res, 200, { ok: true, data: listScopeTree() });
-      }
-
-      // GET /personas/scopes/sessions — 列出「工作区 → 项目 → 会话」树（节点自带会话绑定）
-      if (method === "GET" && segments[0] === "personas" && segments[1] === "scopes" && segments[2] === "sessions") {
-        return json(res, 200, { ok: true, data: await listSessionScopeTree() });
-      }
-
-      // GET /personas/scopes/binding?path= — 读取某路径的精确绑定（无绑定返回空串）
-      if (method === "GET" && segments[0] === "personas" && segments[1] === "scopes" && segments[2] === "binding") {
-        const q = new URLSearchParams((req.url ?? "").split("?", 2)[1] ?? "");
-        const path = q.get("path") ?? "";
-        return json(res, 200, { ok: true, data: { personaId: getPersonaForScopePath(path) } });
-      }
-
-      // PUT /personas/scopes/binding {path, personaId} — 设置某路径绑定（'default'/空 → 回落默认/上层）
-      if (method === "PUT" && segments[0] === "personas" && segments[1] === "scopes" && segments[2] === "binding") {
-        const raw = await readJsonBody(req);
-        const path =
-          typeof raw === "object" && raw !== null && typeof (raw as { path?: unknown }).path === "string"
-            ? (raw as { path: string }).path
-            : "";
-        const personaId =
-          typeof raw === "object" && raw !== null && typeof (raw as { personaId?: unknown }).personaId === "string"
-            ? (raw as { personaId: string }).personaId
-            : "";
-        if (!path) return json(res, 400, { ok: false, error: "invalid body: {path, personaId}" });
-        const bound = bindPersonaToScope(path, personaId);
-        return json(res, 200, { ok: true, data: { personaId: bound } });
-      }
-
-      // DELETE /personas/scopes/bindings/all — 一键清空人格绑定（所有路径 + 会话的人格绑定，技能不受影响）
-      if (method === "DELETE" && segments[0] === "personas" && segments[1] === "scopes" && segments[2] === "bindings" && segments[3] === "all" && segments.length === 4) {
-        clearAllPersonaBindings();
-        return json(res, 200, { ok: true, data: { cleared: true } });
-      }
-
-      // POST /personas {name} — 新建自定义人格
-      if (method === "POST" && segments[0] === "personas" && segments.length === 1) {
-        const raw = await readJsonBody(req);
-        const name =
-          typeof raw === "object" &&
-          raw !== null &&
-          typeof (raw as { name?: unknown }).name === "string"
-            ? (raw as { name: string }).name
-            : "";
-        if (!name.trim()) return json(res, 400, { ok: false, error: "invalid body: {name}" });
-        const data = await createPersonaWithSoul(name);
-        return json(res, 201, { ok: true, data });
-      }
-
-      // PUT /personas/:id {name?, enabled?, content?} — 更新人格元信息 / SOUL 正文
-      if (
-        method === "PUT" &&
-        segments[0] === "personas" &&
-        segments.length === 2 &&
-        segments[1] !== "binding" &&
-        segments[1] !== "scopes"
-      ) {
-        const id = segments[1] ?? "";
-        const raw = await readJsonBody(req);
-        if (typeof raw !== "object" || raw === null) {
-          return json(res, 400, { ok: false, error: "invalid body" });
-        }
-        const b = raw as { name?: unknown; enabled?: unknown; content?: unknown };
-        if (id === "default") return json(res, 400, { ok: false, error: "cannot update built-in default persona" });
-        const updated = await updatePersonaWithContent(id, {
-          name: typeof b.name === "string" ? b.name : undefined,
-          enabled: typeof b.enabled === "boolean" ? b.enabled : undefined,
-          content: typeof b.content === "string" ? b.content : undefined,
-        });
-        if (!updated) return json(res, 404, { ok: false, error: "not found" });
-        return json(res, 200, { ok: true, data: updated });
-      }
-
-      // DELETE /personas/:id — 删除自定义人格（默认人格不可删）
-      if (method === "DELETE" && segments[0] === "personas" && segments.length === 2 && segments[1] !== "binding" && segments[1] !== "scopes") {
-        const removed = await deletePersonaWithSoul(segments[1] ?? "");
-        if (!removed) return json(res, 404, { ok: false, error: "not found" });
-        return json(res, 200, { ok: true, data: { id: segments[1] } });
       }
 
       // ── 会话级技能（session-prompts）与技能注入 ────────────────────────────
@@ -1049,7 +940,7 @@ export function makePromptRoutes(): WebRoute[] {
         return json(res, 200, { ok: true, data: { promptIds } });
       }
 
-      // DELETE /session-prompts/bindings/all — 一键清空技能绑定（所有路径 + 会话的技能绑定，人格不受影响）
+      // DELETE /session-prompts/bindings/all — 一键清空技能绑定（所有路径 + 会话的技能绑定）
       if (method === "DELETE" && segments[0] === "session-prompts" && segments[1] === "bindings" && segments[2] === "all" && segments.length === 3) {
         clearAllSkillBindings();
         return json(res, 200, { ok: true, data: { cleared: true } });
@@ -1067,72 +958,6 @@ export function makePromptRoutes(): WebRoute[] {
       // GET /session-prompts/current-scope — 读取最近活跃的会话 scope（「当前会话」Tab 用）
       if (method === "GET" && segments[0] === "session-prompts" && segments[1] === "current-scope" && segments.length === 2) {
         return json(res, 200, { ok: true, data: { scope: getCurrentSessionScope() } });
-      }
-
-      // GET /session-prompts/diag?sessid= — 会话解析诊断（排查「设了技能却没按设置生效」用）。
-      // 复现组装端同一套解析逻辑，展示该会话当前会命中哪一层（会话绑定/工作区/项目/默认）：
-      // 后端可从 registerSessionListProvider 缓存拿到每个会话的 header.cwd，无需注入宿主的 sessionQuery。
-      if (method === "GET" && segments[0] === "session-prompts" && segments[1] === "diag" && segments.length === 2) {
-        const q = new URLSearchParams((req.url ?? "").split("?", 2)[1] ?? "");
-        const sessid = (q.get("sessid") ?? "").trim() || getCurrentSessionScope() || "";
-        // 同样加超时：诊断页不能因 sessionQuery 挂起而永远转圈
-        let records: Array<{ id: string; cwd: string | null }> = [];
-        try {
-          records = await withTimeout(listSessionRecords(), SESSION_QUERY_TIMEOUT_MS);
-        } catch {
-          records = [];
-        }
-        const rec = records.find((r) => r.id === sessid);
-        // 优先用组装端记录的运行时 cwd（与解析同一来源），避免依赖 sessionQuery 未注入导致误判「无 cwd」
-        const cwd = getActiveSessionCwd(sessid) || rec?.cwd || "";
-        // 人格（只读展示）：会话绑定 → 工作区/项目路径（最深祖先）→ 默认
-        const sessionPersona = sessid ? getPersonaForSession(sessid) : "";
-        const pathPersona = resolvePersonaForPath(cwd || null);
-        const personaId = resolvePersonaForSession(sessid || null, cwd || null);
-        const personaSource = sessionPersona ? "session" : pathPersona ? "path" : "default";
-        const personaName =
-          (personaId && getPersona(personaId)?.name) ||
-          (personaSource === "default" ? "默认人格（default）" : "");
-        // 技能：临时注入优先 + 持久绑定（会话优先、路径回退），合并去重
-        const activeIds = sessid ? getSessionActivePromptIds(sessid) : [];
-        const persistentIds = resolveSessionPromptBindingIds(sessid || null, cwd || null);
-        const seen = new Set<string>();
-        const promptIds: string[] = [];
-        for (const id of [...activeIds, ...persistentIds]) {
-          if (!seen.has(id)) {
-            seen.add(id);
-            promptIds.push(id);
-          }
-        }
-        const promptTitles = getSessionPromptsByIds(promptIds).map((p) => p.title);
-        // 解析用的 cwd 上溯链路（展示「当前工作目录是否命中绑定」的依据）
-        const checkedPaths: string[] = [];
-        if (cwd) {
-          let cur = cwd.replace(/\\/g, "/").trim();
-          while (cur.length > 1 && cur.endsWith("/")) cur = cur.slice(0, -1);
-          if (process.platform === "win32") cur = cur.toLowerCase();
-          for (;;) {
-            checkedPaths.push(cur);
-            const idx = cur.lastIndexOf("/");
-            if (idx <= 0) break;
-            cur = cur.slice(0, idx);
-          }
-          if (!checkedPaths.includes("/")) checkedPaths.push("/");
-        }
-        return json(res, 200, {
-          ok: true,
-          data: {
-            sessid,
-            cwd,
-            personaId: personaId ?? "",
-            personaName,
-            personaSource,
-            promptIds,
-            promptTitles,
-            activeCount: activeIds.length,
-            checkedPaths,
-          },
-        });
       }
 
       // GET /session-prompts/active?scope= — 读取某会话 scope 的临时注入技能 id 列表
@@ -1155,22 +980,6 @@ export function makePromptRoutes(): WebRoute[] {
         return json(res, 200, { ok: true, data: { promptIds } });
       }
 
-      // PUT /session-prompts/session/persona {sessionId, personaId} — 设置某会话持久绑定的人格
-      if (method === "PUT" && segments[0] === "session-prompts" && segments[1] === "session" && segments[2] === "persona") {
-        const raw = await readJsonBody(req);
-        const sessionId =
-          typeof raw === "object" && raw !== null && typeof (raw as { sessionId?: unknown }).sessionId === "string"
-            ? (raw as { sessionId: string }).sessionId
-            : "";
-        const personaId =
-          typeof raw === "object" && raw !== null && typeof (raw as { personaId?: unknown }).personaId === "string"
-            ? (raw as { personaId: string }).personaId
-            : "";
-        if (!sessionId) return json(res, 400, { ok: false, error: "invalid body: {sessionId, personaId}" });
-        setSessionPersonaBindingForSession(sessionId, personaId || null);
-        return json(res, 200, { ok: true, data: { personaId: getPersonaForSession(sessionId) } });
-      }
-
       // PUT /session-prompts/session/prompts {sessionId, promptIds} — 设置某会话持久绑定的技能 id 列表
       if (method === "PUT" && segments[0] === "session-prompts" && segments[1] === "session" && segments[2] === "prompts") {
         const raw = await readJsonBody(req);
@@ -1184,7 +993,7 @@ export function makePromptRoutes(): WebRoute[] {
         return json(res, 200, { ok: true, data: { promptIds } });
       }
 
-      // DELETE /session-prompts/session?sessionId= — 清除某会话的全部绑定（人格回落默认、技能不再注入）
+      // DELETE /session-prompts/session?sessionId= — 清除某会话的技能绑定（不再注入技能）
       if (method === "DELETE" && segments[0] === "session-prompts" && segments[1] === "session" && segments.length === 2) {
         // 注意：tail 已在 parseTail 中去掉了 query（仅保留 pathname），此处需从原始 req.url 解析查询参。
         const raw = req.url ?? "";

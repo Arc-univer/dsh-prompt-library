@@ -592,7 +592,7 @@ export function ImportExportModal(props: {
           {msg?.text ?? ""}
         </div>
 
-        {/* 主体：左右分栏（左列操作+列表，右列预览窗口）——与人格管理一致的面板比例 */}
+        {/* 主体：左右分栏（左列操作+列表，右列预览窗口）——统一的面板比例 */}
         <div
           style={{
             flex: 1,

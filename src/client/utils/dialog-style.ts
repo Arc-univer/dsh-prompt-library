@@ -25,7 +25,7 @@ import type { CSSProperties } from "react";
 
 /**
  * 容器内嵌浮层样式 — 在容器（词库左键面板的右侧内容区）内铺满覆盖，
- * 无半透明遮罩背景：供人格/技能管理详情弹窗、技能开关在左侧词库面板内嵌时使用，
+ * 无半透明遮罩背景：供详情弹窗在左侧词库面板内嵌时使用，
  * 使其铺满右栏展示（由子面板自设尺寸），而非整屏浮层。
  */
 export const PL_DIALOG_EMBED_OVERLAY: CSSProperties = {

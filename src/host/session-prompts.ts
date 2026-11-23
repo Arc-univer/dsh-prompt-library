@@ -2,12 +2,8 @@
  * 会话级技能服务：元信息 + 正文均存 SQLite（prompts.db 的 session_prompts 表），
  * 向上层（路由/组装）暴露统一操作。
  *
- * 与多人格（persona-service）一致：
- * - 元信息（标题/标签/启用/创建与更新时间/使用次数）与正文（注入到系统提示中的内容）
- *   都直接存于 session_prompts 表（body 列），不再落盘 md 文件。
- *
  * 路径绑定（工作区/项目 → 技能 id 列表）与当前会话临时注入：
- * - 持久绑定存于 SQLite（prompts.db 的 prompt_scope_bindings 表，与人格绑定一致）；
+ * - 持久绑定存于 SQLite（prompts.db 的 prompt_scope_bindings / session_scope_bindings 表）；
  * - 当前会话临时注入仅存内存（重启即失效，与「当前会话」语义一致）。
  *
  * 所有函数均为同步读取（系统提示组装是同步回调，无法 await），
@@ -17,9 +13,7 @@ import { randomUUID } from "node:crypto";
 import type { SessionPrompt } from "../types.js";
 import { clampTitle } from "../types.js";
 import {
-  clearAllScopePersonaBindings as dbClearAllScopePersonaBindings,
   clearAllScopePromptBindings as dbClearAllScopePromptBindings,
-  clearAllSessionPersonaBindings as dbClearAllSessionPersonaBindings,
   clearAllSessionPromptBindings as dbClearAllSessionPromptBindings,
   clearScopePromptBinding as dbClearScopePromptBinding,
   clearSessionScopeBinding as dbClearSessionScopeBinding,
@@ -38,7 +32,7 @@ import {
   updateSessionPromptMeta,
 } from "./store.js";
 
-// ── 路径归一化（与人格绑定解析一致）────────────────────────────────────
+// ── 路径归一化 ─────────────────────────────────────────────────────────────
 
 /** 路径归一化：统一为正斜杠、去掉末尾分隔符；Windows 下转小写。 */
 function normalizeScopePath(p: string): string {
@@ -174,7 +168,7 @@ export function deleteSessionPrompt(id: string): boolean {
   return true;
 }
 
-// ── 工作区/项目路径 → 会话级技能 持久绑定（存库，与人格绑定一致）────────
+// ── 工作区/项目路径 → 会话级技能 持久绑定（存库）──────────────────────────
 
 /** 设置某路径（工作区/项目）持久绑定的会话级技能 id 列表（空数组 → 解除绑定）。 */
 export function setScopePromptBinding(path: string, promptIds: string[]): void {
@@ -198,7 +192,7 @@ export function clearScopePromptBinding(path: string): void {
 
 /**
  * 解析某工作目录（agent.session.header.cwd）应持久绑定的会话级技能 id：
- * 从该路径向上逐级找第一个有绑定的层级（最深的祖先/相等匹配，与人格解析一致），
+ * 从该路径向上逐级找第一个有绑定的层级（最深的祖先/相等匹配），
  * 命中即返回该层绑定的技能 id；无任何绑定返回空数组。
  */
 export function resolveBoundPromptIdsForPath(cwd: string | null | undefined): string[] {
@@ -240,7 +234,7 @@ export function clearSessionActivePrompts(scope: string): void {
   activeSessionPrompts.delete(scope);
 }
 
-// ── 当前会话 scope 跟踪（供「技能注入」弹窗「当前会话」Tab 读取）─────────
+// ── 当前会话 scope 跟踪（供「当前会话」维度解析兜底）─────────────────────
 
 /** 最近一次活跃的会话 scope（host 在会话事件时更新；无会话时为 null）。 */
 let currentSessionScope: string | null = null;
@@ -257,16 +251,9 @@ export function getCurrentSessionScope(): string | null {
 
 // ── 会话 id → 会话级技能 持久绑定（存库，优先于路径绑定生效）────────────
 
-/** 设置某会话 id 持久绑定的会话级技能 id 列表（空数组 → 清空该会话的技能绑定维度）。 */
+/** 设置某会话 id 持久绑定的会话级技能 id 列表（空数组 → 清空该会话的技能绑定）。 */
 export function setSessionPromptBindingForSession(sessionId: string, promptIds: string[]): void {
-  dbSetSessionScopeBinding(sessionId, readSessionBoundPersonaId(sessionId), Array.isArray(promptIds) ? promptIds : []);
-}
-
-/** 设置某会话 id 绑定的自定义人格 id（null / '' / 'default' → 清空人格维度，回落默认）。 */
-export function setSessionPersonaBindingForSession(sessionId: string, personaId: string | null): void {
-  const pid = normalizeBoundPersonaId(personaId);
-  const binding = dbGetSessionScopeBinding(sessionId);
-  dbSetSessionScopeBinding(sessionId, pid, binding?.promptIds ?? []);
+  dbSetSessionScopeBinding(sessionId, Array.isArray(promptIds) ? promptIds : []);
 }
 
 /** 读取某会话 id 持久绑定的会话级技能 id 列表（无绑定返回空数组）。 */
@@ -274,62 +261,30 @@ export function getSessionBoundPromptIds(sessionId: string): string[] {
   return dbGetSessionScopeBinding(sessionId)?.promptIds ?? [];
 }
 
-/** 读取某会话 id 持久绑定的自定义人格 id；无绑定返回空串（默认人格）。 */
-export function getSessionBoundPersonaId(sessionId: string): string {
-  return dbGetSessionScopeBinding(sessionId)?.personaId ?? "";
-}
-
 /** 列出全部会话 id → 技能 持久绑定。 */
 export function listSessionBindings(): Array<{ sessionId: string; promptIds: string[] }> {
   return listSessionScopeBindingsAll().map((b) => ({ sessionId: b.sessionId, promptIds: b.promptIds }));
 }
 
-/** 读取某会话 id 持久绑定的自定义人格 id（供技能绑定写回时保留人格维度）。 */
-function readSessionBoundPersonaId(sessionId: string): string {
-  return dbGetSessionScopeBinding(sessionId)?.personaId ?? "";
-}
-
-/** 归一化要写入会话绑定的人格 id：空串 / 'default' → 空串（默认人格）。 */
-function normalizeBoundPersonaId(personaId: string | null | undefined): string {
-  return personaId && personaId !== "default" ? personaId : "";
-}
-
-/** 列出全部会话 id → 人格 + 技能 持久绑定（内部使用，避免重复包装）。 */
-function listSessionScopeBindingsAll(): Array<{
-  sessionId: string;
-  personaId: string;
-  promptIds: string[];
-}> {
-  // 直接复用 store 导出，避免与上方 listSessionBindings 命名冲突
-  return listSessionScopeBindingsFromStore();
-}
-
-/** store 导出的全部会话绑定（见 persona-service 同名语义）。 */
+/** 列出全部会话 id → 技能 持久绑定（内部使用，避免重复包装）。 */
 import { listSessionScopeBindings as dbListSessionScopeBindings } from "./store.js";
 
-function listSessionScopeBindingsFromStore(): Array<{
+function listSessionScopeBindingsAll(): Array<{
   sessionId: string;
-  personaId: string;
   promptIds: string[];
 }> {
   return dbListSessionScopeBindings();
 }
 
-/** 清除某会话 id 的全部绑定（人格回落默认、技能不注入）。 */
+/** 清除某会话 id 的技能绑定（不再注入技能）。 */
 export function clearSessionBinding(sessionId: string): void {
   dbClearSessionScopeBinding(sessionId);
 }
 
-/** 一键清空技能绑定（技能独立模块）：所有路径（工作区/项目）的技能绑定 + 所有会话的临时技能绑定，人格绑定不受影响。 */
+/** 一键清空技能绑定（技能独立模块）：所有路径（工作区/项目）的技能绑定 + 所有会话的技能绑定。 */
 export function clearAllSkillBindings(): void {
   dbClearAllScopePromptBindings();
   dbClearAllSessionPromptBindings();
-}
-
-/** 一键清空人格绑定（人格独立模块）：所有路径（工作区/项目）的人格绑定 + 所有会话的临时人格绑定，技能绑定不受影响。 */
-export function clearAllPersonaBindings(): void {
-  dbClearAllScopePersonaBindings();
-  dbClearAllSessionPersonaBindings();
 }
 
 /**

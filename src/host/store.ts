@@ -25,7 +25,6 @@ import {
   pluginSettingsPath,
   sessionPromptPath,
   SETTINGS_NAMESPACE,
-  soulPath,
   storePath,
   systemSettingsPath,
 } from "./paths.js";
@@ -123,34 +122,6 @@ function getDb(): DatabaseSync {
       updatedAt INTEGER NOT NULL
     );
   `);
-  // 多人格数据表：自定义人格的元信息 + SOUL 正文（正文直接存库，不再落盘 md 文件）。
-  // （技能管理界面仅读取本表用于展示已绑定人格名称；人格 CRUD 已移除。）
-  next.exec(`
-    CREATE TABLE IF NOT EXISTS personas (
-      id        TEXT PRIMARY KEY,
-      name      TEXT NOT NULL,
-      enabled   INTEGER NOT NULL DEFAULT 1,
-      createdAt INTEGER NOT NULL,
-      updatedAt INTEGER NOT NULL,
-      body      TEXT NOT NULL DEFAULT ''
-    );
-  `);
-  // 兼容早期库：缺少 body 列则补建（正文此前存于 character/personas/<id>.md）。
-  try {
-    next.exec("ALTER TABLE personas ADD COLUMN body TEXT NOT NULL DEFAULT ''");
-  } catch {
-    /* 列已存在，忽略 */
-  }
-  // 工作区/项目路径 → 人格 绑定表：按目录路径记录当前启用人格。
-  // 路径即「工作区或其下项目」的绝对路径，人格解析时按「最深的祖先/相等匹配」生效。
-  // （技能管理界面仅读取本表用于展示路径级人格绑定；人格写入口已移除。）
-  next.exec(`
-    CREATE TABLE IF NOT EXISTS persona_scope_bindings (
-      path      TEXT PRIMARY KEY,
-      personaId TEXT NOT NULL,
-      updatedAt INTEGER NOT NULL
-    );
-  `);
   // 工作区/项目路径 → 会话级技能 绑定表：按目录路径记录绑定的技能 id 列表（JSON 数组）。
   // 解析规则：最深的祖先/相等匹配。
   next.exec(`
@@ -180,9 +151,9 @@ function getDb(): DatabaseSync {
   } catch {
     /* 列已存在，忽略 */
   }
-  // 会话 id → 人格 + 会话级技能 绑定表：按「会话 id」持久绑定（优先于工作区/项目路径绑定生效）。
-  // 一个会话一行，personaId 为空表示会话未绑定自定义人格（回落默认/上游），
-  // promptIds 为该会话持久绑定的会话级技能 id 列表（JSON 数组，空/缺省表示未绑定技能）。
+  // 会话 id → 会话级技能 绑定表：按「会话 id」持久绑定（优先于工作区/项目路径绑定生效）。
+  // 一个会话一行；promptIds 为该会话持久绑定的会话级技能 id 列表（JSON 数组，空/缺省表示未绑定技能）。
+  // 注：personaId 列为历史遗留（原人格绑定维度），人格功能已移除，该列不再读写。
   next.exec(`
     CREATE TABLE IF NOT EXISTS session_scope_bindings (
       sessionId  TEXT PRIMARY KEY,
@@ -214,7 +185,7 @@ function getDb(): DatabaseSync {
   db = next;
   // 一次性迁移历史 JSON 数据（失败静默，不影响使用）。
   migrateLegacyJsonIfNeeded().catch(() => {});
-  // 一次性把旧 md 文件中的正文迁入数据库（人格 SOUL / 会话技能正文 / 公告报纸），
+  // 一次性把旧 md 文件中的正文迁入数据库（会话技能正文），
   // 迁移后正文以库为准，md 文件不再被读取（保留原文件不删除）。
   try {
     migrateMdContentToDb();
@@ -562,22 +533,13 @@ async function migrateLegacyJsonIfNeeded(): Promise<void> {
 }
 
 /**
- * 一次性把旧 md 文件中的正文迁入数据库（全局默认人格 SOUL、会话级技能正文）。
+ * 一次性把旧 md 文件中的正文迁入数据库（会话级技能正文）。
  *
  * 仅在数据库中对应正文为空时从 md 文件读入（幂等）；迁移后正文以库为准，
  * 后续读写不再依赖 md 文件（原文件保留不删除）。任何单条失败都静默忽略。
  */
 function migrateMdContentToDb(): void {
-  // 1. 全局默认人格 SOUL：character/SOUL.md → meta 键
-  if (!getDefaultPersonaSoul()) {
-    try {
-      const content = stripBom(readFileSync(soulPath(), "utf8")).trim();
-      if (content) setDefaultPersonaSoul(content);
-    } catch {
-      /* 文件不存在，忽略 */
-    }
-  }
-  // 2. 会话级技能正文：session-prompts/<id>.md → session_prompts.body
+  // 会话级技能正文：session-prompts/<id>.md → session_prompts.body
   for (const r of listSessionPromptRecords()) {
     if (r.body) continue;
     try {
@@ -1649,21 +1611,6 @@ export function deleteSessionPromptRecord(id: string): boolean {
   return true;
 }
 
-// ── 全局默认人格 SOUL（meta 表存储）───────────────────────────────────────
-
-/** 默认人格 SOUL 在 meta 表中的键（正文直接存库，不再落盘 character/SOUL.md）。 */
-const DEFAULT_SOUL_META_KEY = "pl:default-persona-soul";
-
-/** 读取全局默认人格 SOUL 正文；未初始化返回空串。 */
-export function getDefaultPersonaSoul(): string {
-  return getMetaValue(DEFAULT_SOUL_META_KEY);
-}
-
-/** 写入全局默认人格 SOUL 正文。 */
-export function setDefaultPersonaSoul(content: string): void {
-  setMetaValue(DEFAULT_SOUL_META_KEY, content);
-}
-
 // ── 工作区/项目路径 → 会话级技能 绑定（存库）──────────────────────────────
 
 /** 记录某路径（工作区或其下项目）绑定的会话级技能 id 列表（空数组 → 解除绑定）。 */
@@ -1731,213 +1678,56 @@ export function clearAllScopePromptBindings(): void {
   }
 }
 
-// ── 人格读取（仅展示用：技能管理界面显示已绑定人格名称；人格 CRUD 已移除）──
+// ── 会话 id → 会话级技能 绑定（存库，优先于路径绑定生效）──────────────────
 
-/** 人格记录（元信息 + SOUL 正文）。 */
-export interface PersonaRecord {
-  id: string;
-  name: string;
-  enabled: boolean;
-  createdAt: number;
-  updatedAt: number;
-  /** SOUL 正文（自定义人格直接存于本表 body 列）。 */
-  body: string;
-}
-
-/** 读取一行人格记录的辅助函数（codec 内联，避免重复写列映射）。 */
-function personaFromRow(row: {
-  id: string;
-  name: string;
-  enabled: number;
-  createdAt: number;
-  updatedAt: number;
-  body: string;
-}): PersonaRecord {
-  return {
-    id: row.id,
-    name: row.name,
-    enabled: row.enabled === 1,
-    createdAt: row.createdAt,
-    updatedAt: row.updatedAt,
-    body: row.body ?? "",
-  };
-}
-
-/** 列出全部自定义人格（按创建时间升序）。 */
-export function listPersonas(): PersonaRecord[] {
-  try {
-    const rows = getDb()
-      .prepare("SELECT id, name, enabled, createdAt, updatedAt, body FROM personas ORDER BY createdAt ASC")
-      .all() as Array<{ id: string; name: string; enabled: number; createdAt: number; updatedAt: number; body: string }>;
-    return rows.map(personaFromRow);
-  } catch {
-    return [];
-  }
-}
-
-/** 按 id 读取单个人格；不存在返回 undefined。 */
-export function getPersona(id: string): PersonaRecord | undefined {
-  try {
-    const row = getDb()
-      .prepare("SELECT id, name, enabled, createdAt, updatedAt, body FROM personas WHERE id = ?")
-      .get(id) as
-      | { id: string; name: string; enabled: number; createdAt: number; updatedAt: number; body: string }
-      | undefined;
-    return row ? personaFromRow(row) : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-/** 创建人格记录（元信息 + SOUL 正文，一并存库）。 */
-export function createPersona(id: string, name: string, body: string = ""): PersonaRecord {
-  const now = Date.now();
-  const db_ = getDb();
-  db_
-    .prepare("INSERT INTO personas (id, name, enabled, createdAt, updatedAt, body) VALUES (?, ?, 1, ?, ?, ?)")
-    .run(id, name, now, now, body);
-  return { id, name, enabled: true, createdAt: now, updatedAt: now, body };
-}
-
-/** 更新人格（name / enabled / body）；记录不存在返回 false。 */
-export function updatePersonaMeta(
-  id: string,
-  patch: { name?: string; enabled?: boolean; body?: string },
-): boolean {
-  const existing = getPersona(id);
-  if (!existing) return false;
-  const next: PersonaRecord = {
-    ...existing,
-    name: patch.name ?? existing.name,
-    enabled: patch.enabled ?? existing.enabled,
-    body: patch.body ?? existing.body,
-    updatedAt: Date.now(),
-  };
-  getDb()
-    .prepare("UPDATE personas SET name = ?, enabled = ?, body = ?, updatedAt = ? WHERE id = ?")
-    .run(next.name, next.enabled ? 1 : 0, next.body, next.updatedAt, id);
-  return true;
-}
-
-/** 删除人格记录及其（工作区/项目）绑定（SOUL 文件删除由 persona 服务负责）。 */
-export function deletePersona(id: string): boolean {
-  const db_ = getDb();
-  db_.prepare("DELETE FROM personas WHERE id = ?").run(id);
-  db_.prepare("DELETE FROM persona_scope_bindings WHERE personaId = ?").run(id);
-  // 清理所有会话绑定中引用该人格的维度（回到默认人格）。
-  for (const b of listSessionScopeBindings()) {
-    if (b.personaId === id) {
-      setSessionScopeBinding(b.sessionId, null, b.promptIds);
-    }
-  }
-  return true;
-}
-
-// ── 工作区/项目路径 → 人格 绑定（存库，最深的祖先/相等匹配解析）──────────
-
-/** 记录某路径（工作区或其下项目）当前绑定的人格（personaId 为 'default' 或空表示使用全局默认人格）。 */
-export function setScopePersonaBinding(path: string, personaId: string): void {
-  const db_ = getDb();
-  db_
-    .prepare(
-      "INSERT INTO persona_scope_bindings (path, personaId, updatedAt) VALUES (?, ?, ?) ON CONFLICT(path) DO UPDATE SET personaId = excluded.personaId, updatedAt = excluded.updatedAt",
-    )
-    .run(path, personaId, Date.now());
-}
-
-/** 读取某路径精确绑定的人格 id；无绑定返回空串。 */
-export function getScopeBoundPersonaId(path: string): string {
-  try {
-    const row = getDb()
-      .prepare("SELECT personaId FROM persona_scope_bindings WHERE path = ?")
-      .get(path) as { personaId: string } | undefined;
-    return row?.personaId ?? "";
-  } catch {
-    return "";
-  }
-}
-
-/** 列出全部路径 → 人格 绑定（personaId 均为非空有效 id，不含 'default'）。 */
-export function listScopeBindings(): Array<{ path: string; personaId: string }> {
-  try {
-    return getDb()
-      .prepare("SELECT path, personaId FROM persona_scope_bindings")
-      .all() as Array<{ path: string; personaId: string }>;
-  } catch {
-    return [];
-  }
-}
-
-/** 清空某路径的人格绑定（回到默认人格）。 */
-export function clearScopePersonaBinding(path: string): void {
-  try {
-    getDb().prepare("DELETE FROM persona_scope_bindings WHERE path = ?").run(path);
-  } catch {
-    /* 删除失败静默 */
-  }
-}
-
-/** 清空全部路径（工作区/项目）的人格绑定（一律回到默认人格）。 */
-export function clearAllScopePersonaBindings(): void {
-  try {
-    getDb().prepare("DELETE FROM persona_scope_bindings").run();
-  } catch {
-    /* 删除失败静默 */
-  }
-}
-
-// ── 会话 id → 人格 + 会话级技能 绑定（存库，优先于路径绑定生效）──────────
-
-/** 记录某会话 id 绑定的人格与会话级技能 id 列表（personaId 为空 / promptIds 空 → 相应维度未绑定）。 */
+/** 记录某会话 id 持久绑定的会话级技能 id 列表（空数组 → 相应维度未绑定）。 */
 export function setSessionScopeBinding(
   sessionId: string,
-  personaId: string | null,
   promptIds: string[],
 ): void {
   const ids = [...new Set(promptIds.filter(Boolean))];
   const db_ = getDb();
   db_
     .prepare(
-      "INSERT INTO session_scope_bindings (sessionId, personaId, promptIds, updatedAt) VALUES (?, ?, ?, ?) ON CONFLICT(sessionId) DO UPDATE SET personaId = excluded.personaId, promptIds = excluded.promptIds, updatedAt = excluded.updatedAt",
+      "INSERT INTO session_scope_bindings (sessionId, personaId, promptIds, updatedAt) VALUES (?, '', ?, ?) ON CONFLICT(sessionId) DO UPDATE SET promptIds = excluded.promptIds, updatedAt = excluded.updatedAt",
     )
-    .run(sessionId, personaId ?? "", JSON.stringify(ids), Date.now());
+    .run(sessionId, JSON.stringify(ids), Date.now());
 }
 
-/** 读取某会话 id 绑定的完整记录；无绑定返回 undefined。 */
+/** 读取某会话 id 绑定的技能 id 列表；无绑定返回 undefined。 */
 export function getSessionScopeBinding(
   sessionId: string,
-): { personaId: string; promptIds: string[] } | undefined {
+): { promptIds: string[] } | undefined {
   try {
     const row = getDb()
-      .prepare("SELECT personaId, promptIds FROM session_scope_bindings WHERE sessionId = ?")
-      .get(sessionId) as { personaId: string; promptIds: string } | undefined;
+      .prepare("SELECT promptIds FROM session_scope_bindings WHERE sessionId = ?")
+      .get(sessionId) as { promptIds: string } | undefined;
     if (!row) return undefined;
-    return { personaId: row.personaId, promptIds: parsePromptIds(row.promptIds) };
+    return { promptIds: parsePromptIds(row.promptIds) };
   } catch {
     return undefined;
   }
 }
 
-/** 列出全部会话 id → 人格 + 技能 绑定（仅含存在记录的会话）。 */
+/** 列出全部会话 id → 技能 绑定（仅含存在记录的会话）。 */
 export function listSessionScopeBindings(): Array<{
   sessionId: string;
-  personaId: string;
   promptIds: string[];
 }> {
   try {
     return getDb()
-      .prepare("SELECT sessionId, personaId, promptIds FROM session_scope_bindings")
+      .prepare("SELECT sessionId, promptIds FROM session_scope_bindings")
       .all()
       .map((r) => {
-        const row = r as { sessionId: string; personaId: string; promptIds: string };
-        return { sessionId: row.sessionId, personaId: row.personaId, promptIds: parsePromptIds(row.promptIds) };
+        const row = r as { sessionId: string; promptIds: string };
+        return { sessionId: row.sessionId, promptIds: parsePromptIds(row.promptIds) };
       });
   } catch {
     return [];
   }
 }
 
-/** 清除某会话 id 的绑定（回到默认人格 / 不注入技能）。 */
+/** 清除某会话 id 的绑定（不注入技能）。 */
 export function clearSessionScopeBinding(sessionId: string): void {
   try {
     getDb().prepare("DELETE FROM session_scope_bindings WHERE sessionId = ?").run(sessionId);
@@ -1946,19 +1736,10 @@ export function clearSessionScopeBinding(sessionId: string): void {
   }
 }
 
-/** 清空全部会话技能绑定（仅置空各会话的技能维度，保留人格绑定 —— 人格与技能是两个独立模块）。 */
+/** 清空全部会话技能绑定（仅置空各会话的技能维度）。 */
 export function clearAllSessionPromptBindings(): void {
   try {
     getDb().prepare("UPDATE session_scope_bindings SET promptIds = '[]', updatedAt = ?").run(Date.now());
-  } catch {
-    /* 更新失败静默 */
-  }
-}
-
-/** 清空全部会话人格绑定（仅置空各会话的人格维度，保留技能绑定 —— 人格与技能是两个独立模块）。 */
-export function clearAllSessionPersonaBindings(): void {
-  try {
-    getDb().prepare("UPDATE session_scope_bindings SET personaId = '', updatedAt = ?").run(Date.now());
   } catch {
     /* 更新失败静默 */
   }

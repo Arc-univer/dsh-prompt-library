@@ -99,69 +99,6 @@ export interface PromptPatch {
   lastUsedAt?: number;
 }
 
-/** 人格元信息（来自 SQLite personas 表）。 */
-export interface PersonaMeta {
-  /** 稳定标识（UUID）；保留 id `default` 表示内置默认人格。 */
-  id: string;
-  /** 人格名称（可编辑）。 */
-  name: string;
-  /** 是否启用（禁用的人格不会被按会话注入）。 */
-  enabled: boolean;
-  /** 创建时间的纪元毫秒时间戳。 */
-  createdAt: number;
-  /** 最后一次修改的纪元毫秒时间戳。 */
-  updatedAt: number;
-}
-
-/** 面向 UI 的完整人格视图：元信息 + SOUL 正文 + 是否内置默认。 */
-export interface PersonaView extends PersonaMeta {
-  /** 是否为内置默认人格（不可删除/重命名）。 */
-  isDefault: boolean;
-  /** SOUL 正文（默认人格存于 meta 表，自定义人格存于 personas.body）。 */
-  content: string;
-}
-
-/** 工作区/项目路径 → 人格 绑定视图（无绑定返回空串表示「使用默认人格」）。 */
-export interface PersonaBinding {
-  /** 该路径精确绑定的自定义人格 id；空串表示未精确绑定（回落默认/上层）。 */
-  personaId: string;
-}
-
-/** 会话（会话 id 维度绑定）：会话在树中挂载到其工作目录 cwd 命中的工作区/项目节点下。 */
-export interface SessionNode {
-  /** 会话 id（持久绑定的 key，也即注入时的 context.scope）。 */
-  id: string;
-  /** 展示名（有标题用标题，否则回落为「会话 + id 片段」）。 */
-  title: string;
-  /** 会话工作目录（header.cwd），用于归属到工作区/项目树。 */
-  cwd: string;
-  /** 该会话精确绑定的人格 id（'' 表示未绑定，回落默认/上层）。 */
-  boundPersonaId: string;
-  /** 该会话精确绑定的技能 id 列表。 */
-  boundPromptIds: string[];
-}
-
-/** 「其他会话」分组的合成路径 key（未命中任何工作区/项目的会话归入该分组，前端据此本地化标题）。 */
-export const UNMATCHED_SCOPE_PATH = "__pl_unmatched__";
-
-/** 「工作区 → 项目 → 会话」树节点：供技能管理右栏「项目绑定」树形选择并绑定。 */
-export interface ScopeNode {
-  /** 绝对路径（绑定的 key）。 */
-  path: string;
-  /** 展示名（工作区用其标题，项目用目录名）。 */
-  title: string;
-  /** 节点类型。 */
-  kind: "workspace" | "project";
-  /** 该层精确绑定的人格 id（'' 表示未精确绑定，回落默认/上层）。 */
-  bound: string;
-  /** 该路径精确绑定的技能 id 列表（会话级技能注入弹窗用）。 */
-  boundPromptIds?: string[];
-  /** 归属到本节点的会话（按 cwd 最深的路径前缀匹配）。 */
-  sessions?: SessionNode[];
-  /** 子项目节点（工作区下）或空数组（项目无下级）。 */
-  children: ScopeNode[];
-}
-
 /** 插件设置。 */
 export interface PluginSettings {
   /** 面板宽度（px）。 */

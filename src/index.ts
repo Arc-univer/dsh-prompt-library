@@ -1,8 +1,8 @@
 /**
  * dsh-prompt-library — host 入口。
  *
- * 在 /api/prompt-library 下注册 HTTP 路由（提示词 CRUD 等），并把人格、
- * HARNESS 与工作区技能注入组装进会话 systemPrompt。路由注册依赖于 webServer
+ * 在 /api/prompt-library 下注册 HTTP 路由（提示词 CRUD 等），并把 HARNESS
+ * 与工作区技能注入组装进会话 systemPrompt。路由注册依赖于 webServer
  * 是否可用（无头 profile 得到一个空操作插件——那里没有 UI 来驱动）。
  */
 import type { Context } from "@deepseek-ai/cordis";
@@ -19,8 +19,6 @@ import {
 } from "./host/session-prompts.js";
 import { logAiInjected, registerLlm } from "./host/ai.js";
 import { disabledHarnessSkillsInstruction } from "./host/skills.js";
-import { soulSystemSync, ensureSoulFile } from "./host/character.js";
-import { resolvePersonaForSession } from "./host/persona-service.js";
 import {
   registerSessionListProvider,
   recordActiveSessionCwd,
@@ -41,7 +39,7 @@ export const inject: string[] = [];
 
 /**
  * 组装「会话级技能注入」段文本：
- * - 优先取当前会话 scope 的临时注入（技能注入弹窗「当前会话」Tab，仅本会话生效）；
+ * - 优先取当前会话 scope 的临时注入（仅本会话生效，重启即失效）；
  * - 其次取当前会话 id 的持久绑定（若该会话绑定了技能则只注入这些，不再用路径绑定）；
  * - 再次取工作目录 cwd 命中的「工作区/项目」持久绑定（最深的祖先/相等匹配）。
  * 按序累积、按 id 去重、临时注入优先。无任何命中返回空串（不注入额外段落）。
@@ -78,7 +76,7 @@ function buildSessionPromptInjection(scope: unknown, cwd: string): string {
 export function apply(ctx: Context) {
   const routes = makePromptRoutes();
 
-  // 记录最近活跃的会话 scope：供「技能注入」弹窗「当前会话」Tab 读取当前会话的临时注入。
+  // 记录最近活跃的会话 scope：供「当前会话」维度的技能绑定/临时注入解析兜底。
   // cordis Context 的 on/off 事件名是强类型联合，官方 `session/event` 不在类型表里，
   // 故按最小事件总线形状转换（运行时仍是同一份 ctx）。
   const bus = ctx as unknown as {
@@ -95,10 +93,10 @@ export function apply(ctx: Context) {
   };
   bus.on("session/event", onSessionScope);
 
-  // 注册「会话列表」提供器：供会话绑定 UI（工作区 → 项目 → 会话）读取全部会话的 id / 标题 / 工作目录。
+  // 注册「会话列表」提供器：项目技能导出等场景需要按会话 id 反查真实工作目录。
   // 会话查询依赖宿主的 sessionQuery 服务（@deepseek-ai/dsh-session-query，可能未注入）。
   // 注意：不能直接读 ctx.sessionQuery —— 未注入时 Cordis 会抛「cannot get property without inject」，
-  // 必须用 ctx.inject 等待服务注入后，在子上下文里访问；服务不可用则不注册，树里不显示会话。
+  // 必须用 ctx.inject 等待服务注入后，在子上下文里访问；服务不可用则注册为空操作。
   try {
     ctx.inject(["sessionQuery"], (sessionCtx: unknown) => {
       const sc = sessionCtx as unknown as {
@@ -133,45 +131,37 @@ export function apply(ctx: Context) {
       });
     });
   } catch {
-    /* sessionQuery 服务不可用：树里不显示会话 */
+    /* sessionQuery 服务不可用：按无会话列表降级 */
   }
 
   // 数据库懒初始化：首次访问数据时自动创建 prompts.db 表，
   // 并在 db 无数据时一次性迁移旧 prompts.json 到 SQLite（导入后删除旧文件）。
   // 失败静默忽略，不影响其他功能，故此处无需显式初始化调用。
 
-  // 确保 AI 人格正文存在（缺失时写入默认模板），供 AI 润色/完善/会话组装时遵守。
-  ensureSoulFile().catch(() => {});
   // 首次使用（技能库为空）时播种三条默认技能（编程 / 文员 / 律师），只播种一次。
   seedDefaultSessionPromptsIfEmpty();
 
-  // 把「身份人格 + 会话上下文」注入当前聊天。为让人格/技能不被其他插件冲掉，拆成两个 section。
+  // 把「会话上下文」注入当前聊天（技能注入 / 禁用技能指令 / 首次欢迎）。
   //
-  // 重要：宿主（@deepseek-ai/dsh-system-prompt）已把全局槽位「deployment:persona」(order 0)
-  // 写死在 systemPrompt 服务里。section 的作用域由**调用它的上下文**决定（dsh-scope 的 scopeOf）：
-  //  - 若像旧代码那样在「插件全局上下文」里注册同名 section → 与宿主全局槽位重名抛错，注入整段失效；
-  //  - 正确做法是在「agent/created」时，用该 agent 的 scoped context（agent.ctx）经 inject 注册，
-  //    此时 section 落入该会话的 scoped layer，同名即 shadow 宿主默认人格，成为该会话最权威身份，
-  //    且随 agent 销毁自动回收。
-  const PERSONA_SECTION_NAME = "deployment:persona";
-  // 解析组装上下文 → 会话 id 与工作目录（供按会话 / 按工作区-项目绑定人格与技能）。
+  // 注（fork 变更）：原实现还会注册 order 0 的「deployment:persona」section，把插件默认人格
+  // 「词库助手」注入每个会话并 shadow 宿主人格槽位，导致所有对话的系统提示词都被插件污染，
+  // 人格功能已整体移除，不再注册任何人格 section。
+  //
+  // 重要：section 的作用域由**调用它的上下文**决定（dsh-scope 的 scopeOf）：
+  // 在「agent/created」时用该 agent 的 scoped context（agent.ctx）经 inject 注册，
+  // section 落入该会话的 scoped layer，随 agent 销毁自动回收。
+  // 解析组装上下文 → 会话 id 与工作目录（供按会话 / 按工作区-项目绑定技能）。
   // 真正会话 id 在 agent.session.id，工作目录在 agent.session.header.cwd；缺失时回退到最近活跃会话。
   const resolveAssemblySession = (context: unknown): { sessionId: string; cwd: string } => {
     const agent = (context as { agent?: { session?: { header?: { cwd?: unknown }; id?: unknown } } } | undefined)?.agent;
     const cwd = typeof agent?.session?.header?.cwd === "string" ? agent.session.header.cwd : "";
     const agentSessionId = typeof agent?.session?.id === "string" ? agent.session.id : "";
-    // 会话绑定 / 诊断的键以最近活跃会话记录为准（与本插件绑定 UI、诊断卡同一口径），少量场景兜底。
+    // 会话绑定的键以最近活跃会话记录为准，agent 尚未就绪等少量场景兜底。
     const sessionId = agentSessionId || (getCurrentSessionScope() ?? "");
     recordActiveSessionCwd(sessionId, cwd);
     return { sessionId, cwd };
   };
-  // 人格 section 正文（order 0）：会话 id 绑定优先、工作目录路径绑定回退；无命中时走全局默认人格。
-  const personaSectionText = (context: unknown): string => {
-    const { sessionId, cwd } = resolveAssemblySession(context);
-    const personaId = resolvePersonaForSession(sessionId || null, cwd || null);
-    return soulSystemSync(personaId);
-  };
-  // 其余会话约束 section（order 800，位于工具指引 100-199 之后，贴近 prompt 末尾以增强遵守）：
+  // 会话约束 section（order 800，位于工具指引 100-199 之后，贴近 prompt 末尾以增强遵守）：
   // - 技能注入：当前会话「临时注入」优先，其次会话 id 持久绑定，再次工作目录路径绑定；
   // - 禁用技能指令：把用户禁用的 ~/.dsh/skills / 项目技能清单注入为软控制；
   // - 欢迎：只对第一个新会话注入一次简短问候。
@@ -186,7 +176,7 @@ export function apply(ctx: Context) {
     if (welcome) parts.push(welcome);
     return parts.filter((p) => p.trim()).join("\n\n");
   };
-  // 每个 agent 就绪：经其 scoped context 注册两个 section（同一 agent 只触发一次，随 agent 销毁自动回收）。
+  // 每个 agent 就绪：经其 scoped context 注册 section（同一 agent 只触发一次，随 agent 销毁自动回收）。
   // cordis ctx.on 事件名是强类型联合，`agent/created` 不在类型表里，故按最小事件总线形状转换（运行时同一份 ctx）。
   const agentBus = ctx as unknown as {
     on(event: "agent/created", listener: (payload: { agent?: { ctx?: unknown } }) => void): unknown;
@@ -199,18 +189,12 @@ export function apply(ctx: Context) {
         const sp = (promptCtx as unknown as {
           systemPrompt: { section: (s: PromptSection) => () => void };
         }).systemPrompt;
-        const disposePersona = sp.section({
-          name: PERSONA_SECTION_NAME,
-          order: 0,
-          text: personaSectionText,
-        });
         const disposeContext = sp.section({
           name: "prompt-library-context",
           order: 800,
           text: workspaceSectionText,
         });
         return () => {
-          disposePersona();
           disposeContext();
         };
       });
