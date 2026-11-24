@@ -61,60 +61,36 @@ DSH（DeepSeek Harness）词库插件：在聊天栏提供**提示词管理**与
     └── ai-YYYY-MM-DD.log   # AI 调用诊断日志（按日期分文件）
 ```
 
-## 安装
-
-### npm
+## Installation
 
 ```bash
 dsh plugin --profile web add @sunjuntao/dsh-prompt-library
 ```
 
-### GitHub（含 DSH Desktop）
+### GitHub (including DSH Desktop)
 
-在 DSH Desktop 中选择通过 GitHub 安装，填写你的 fork 仓库地址。仓库必须已经包含编译后的 `lib/` 文件；通过 GitHub 安装不会自动构建 `src/`。
+In DSH Desktop, choose GitHub installation and enter your fork's repository URL. The repository must already contain the compiled `lib/` files; GitHub installation does not build `src/` automatically.
 
-通过 CLI 安装指定标签：
+To install a specific tag through the CLI:
 
 ```bash
-dsh plugin add github:<所有者>/<仓库>#v1.1.0
+dsh plugin add github:<owner>/<repository>#v1.1.0
 ```
 
-请替换为你自己的仓库与标签。安装修改后的源码前，先完成下文的构建与分发步骤。
+Replace the owner, repository and tag with your own. See the distribution steps below before installing your modified source.
 
-## 使用
+## Usage
 
-启动 `dsh web`，点击侧边栏设置按钮上方的「词库」菜单进入各功能面板；或在聊天栏点「词库」按钮、输入 `#` 快速触发选择；点击「AI 优化」一键优化输入内容。
+Start `dsh web`, click the "Library" menu button above the settings button in the sidebar to reach every feature panel; or use the prompt-library button beside the chat input, type `#` for the quick picker, and click "AI Polish" to polish your input with one click.
 
-## 开发 / 构建
-
-### 正式构建
+## Development / Build
 
 ```bash
 npm install
-npm run build   # 生成 lib/index.js 与 lib/client.js
+npm run deploy   # type check + build + sync to DSH (restart dsh web to take effect)
 ```
 
-具备 DSH 宿主类型声明时，发布前还应运行 `npm run typecheck`。类型检查与打包的环境要求不同：
-
-- `npm run build` 将 `@deepseek-ai/*` 视为宿主运行时 external 依赖，不要求本地存在 DSH Web profile，也不要求将这些包安装到项目中。
-- `npm run typecheck` 需要这些包的 TypeScript 类型声明。Desktop 下出现 `TS2307` 通常表示缺少类型声明，并不表示 Desktop 无法构建插件。
-- `npm run link-dsh-deps` 只从 `~/.dsh/profiles/node_modules/@deepseek-ai` 链接类型包，目前依赖上述 Web profile 目录结构，不是通用的 Desktop 依赖定位工具。
-
-本地 Web profile 开发可执行 `npm run deploy`，它执行**开发构建**并同步到本地 profile；它**不执行 TypeScript 类型检查**，也不能替代上述正式构建。同步后需重启 `dsh web`。
-
-### GitHub 分发与更新
-
-1. 构建前更新 `package.json` / `package-lock.json` 版本号，例如功能版本执行 `npm version minor --no-git-tag-version`。版本号会写入两个构建产物。
-2. 有宿主类型声明时运行 `npm run typecheck`，随后无论是否执行类型检查，都必须运行 `npm run build`。
-3. 同时提交源码和重新生成的 `lib/index.js` / `lib/client.js`。只推送 `src/` 会让 GitHub 安装继续运行旧产物。
-4. 推送提交和新的 `v<版本号>` 标签，不要让同一个标签对应不同代码。
-5. 在 DSH 中从新提交或新标签更新/重新安装插件，然后重启 DSH/Desktop。仅推送 GitHub 不会自动更新已经安装的副本。
-
-通过 GitHub 分发时**不需要另行发布 npm 包**。如果要以新包名发布 npm，必须同时修改 `package.json` 的 `name` 与 `cordis.patch.yml` 中的插件名称并重新构建；`npm publish` 会通过 `prepublishOnly` 执行正式构建。
-
-`npm run release` 只会在工作区干净时创建并推送版本标签，不会构建或提交 `lib/`，也不会发布 npm。当前仓库没有自动构建 Release 产物的 GitHub Actions workflow。
-
-## 效果图
+## Screenshots
 
 ![1789779289907](images/README/1789779289907.png)![1789779291686](images/README/1789779291686.png)![1789779294779](images/README/1789779294779.png)
 
