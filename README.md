@@ -63,9 +63,23 @@ The library uses **SQLite** (`node:sqlite`); all other configs and logs are stor
 
 ## Installation
 
+### npm
+
 ```bash
 dsh plugin --profile web add @sunjuntao/dsh-prompt-library
 ```
+
+### GitHub (including DSH Desktop)
+
+In DSH Desktop, choose GitHub installation and enter your fork's repository URL. The repository must already contain the compiled `lib/` files; GitHub installation does not build `src/` automatically.
+
+To install a specific tag through the CLI:
+
+```bash
+dsh plugin add github:<owner>/<repository>#v1.1.0
+```
+
+Replace the owner, repository and tag with your own. See the distribution steps below before installing your modified source.
 
 ## Usage
 
@@ -73,10 +87,32 @@ Start `dsh web`, click the "Library" menu button above the settings button in th
 
 ## Development / Build
 
+### Production build
+
 ```bash
 npm install
-npm run deploy   # type check + build + sync to DSH (restart dsh web to take effect)
+npm run build   # outputs lib/index.js and lib/client.js
 ```
+
+Run `npm run typecheck` before release when the DSH host type declarations are available. Type checking and bundling have different requirements:
+
+- `npm run build` treats `@deepseek-ai/*` packages as external runtime dependencies. It works without a local DSH Web profile and does not require those packages to be installed locally.
+- `npm run typecheck` needs their TypeScript declarations. `TS2307` errors on Desktop usually mean the declarations are missing, not that Desktop cannot build the plugin.
+- `npm run link-dsh-deps` only links declarations from `~/.dsh/profiles/node_modules/@deepseek-ai`; it currently expects that Web-profile directory layout and is not a generic Desktop dependency locator.
+
+For local Web-profile development, `npm run deploy` performs a **development build** and syncs it to the local profile. It does **not** run TypeScript type checking and is not a substitute for the production build above. Restart `dsh web` after syncing.
+
+### GitHub distribution and updates
+
+1. Bump `package.json` / `package-lock.json` before building, for example with `npm version minor --no-git-tag-version` for a feature release. The version is embedded into both bundles.
+2. Run `npm run typecheck` when host declarations are available, then always run `npm run build`.
+3. Commit both the source changes and the regenerated `lib/index.js` / `lib/client.js`. Pushing only `src/` leaves GitHub installations running the previous bundles.
+4. Push the commit and a new `v<version>` tag. Do not reuse an old tag for different code.
+5. Update or reinstall the plugin from the new commit/tag in DSH, then restart DSH/Desktop. Pushing to GitHub alone does not update an installed copy.
+
+A separate npm package is **not required** for GitHub distribution. If you choose npm distribution under a new package name, update both `name` in `package.json` and the plugin name in `cordis.patch.yml`, then rebuild; `prepublishOnly` runs the production build during `npm publish`.
+
+`npm run release` only creates and pushes the version tag after checking for a clean worktree. It does not build or commit `lib/`, nor publish to npm. This repository currently has no GitHub Actions workflow that builds release artifacts automatically.
 
 ## Screenshots
 
