@@ -12,6 +12,8 @@
 > - **Persona (SOUL) feature removed entirely**: the upstream plugin injected its default "prompt library assistant" persona into **every** conversation's system prompt (shadowing the host identity slot), polluting all chats. Persona injection, storage, bindings and management UI have been removed; conversations keep the host's native identity again.
 > - **Dead code with no references removed**: `PersonaManagerModal`, `PromptInjectPanel`, `HarnessSkillPanel`, `SubPanelModal`, `enrichPromptProfessional`.
 > - AI polish and all other AI capabilities are unchanged; the only system-prompt injection left is skill injection (explicitly bound by the user).
+> - **Project-scoped prompt isolation**: prompts can be global or project-specific. "Current project" includes only global prompts and prompts belonging to the current project; `#` selection and context recommendations exclude other projects. Data Management supports project filters, grouping and path relinking.
+> - **Manual drag ordering**: drag ordering persists across sessions, with confirmation before smart sort is disabled and a one-click re-enable entry. Recycle Bin and JSON / CSV import/export preserve project ownership and manual order.
 
 # dsh-prompt-library
 
