@@ -2,6 +2,21 @@
  * 词库共享类型（host ↔ client）。
  */
 
+/** 提示词归属：全局共享，或仅归属某个项目。 */
+export type PromptScope = "global" | "project";
+
+/** 列表排序模式：智能排序保持既有规则，手动排序使用用户拖拽顺序。 */
+export type PromptSortMode = "smart" | "manual";
+
+/** 项目路径的规范化信息；key 用于跨大小写匹配，path 用于界面展示。 */
+export interface PromptProject {
+  key: string;
+  path: string;
+  name: string;
+  /** 当前项目中的专属提示词数量（项目列表接口返回）。 */
+  count?: number;
+}
+
 /** 一条可复用的提示词片段，持久化到 SQLite（~/.dsh/prompt-library/db/prompts.db）。 */
 export interface Prompt {
   /** 稳定标识（UUID）。 */
@@ -28,6 +43,14 @@ export interface Prompt {
   usageCount: number;
   /** 最后一次使用的纪元毫秒时间戳。 */
   lastUsedAt: number;
+  /** 归属范围；旧数据迁移时统一为 global。 */
+  scope: PromptScope;
+  /** 项目展示路径；仅 scope=project 时存在。 */
+  projectPath?: string;
+  /** 项目匹配键；Windows 忽略大小写，POSIX 保留大小写。 */
+  projectKey?: string;
+  /** 手动排序权重，数值越小越靠前。 */
+  sortOrder: number;
 }
 
 /** 回收站中的一条提示词（含删除时间）。 */
@@ -85,6 +108,9 @@ export interface PromptInput {
   title: string;
   body: string;
   tags?: string[];
+  /** 缺省为 global；project 必须同时提供 projectPath。 */
+  scope?: PromptScope;
+  projectPath?: string;
 }
 
 /** 更新请求的请求体（所有字段可选，但如果都不传则不生效）。 */
@@ -97,6 +123,8 @@ export interface PromptPatch {
   aiRefined?: boolean;
   usageCount?: number;
   lastUsedAt?: number;
+  scope?: PromptScope;
+  projectPath?: string;
 }
 
 /** 插件设置。 */
@@ -129,6 +157,8 @@ export interface PluginSettings {
   aiModel: string;
   /** 是否启用「数据管理」入口（含导入导出/标签/回收站）。默认开启。 */
   dataManagementEnabled: boolean;
+  /** 提示词列表排序模式；默认智能排序，手动模式开放拖拽。 */
+  promptSortMode: PromptSortMode;
 }
 
 /** 设置的默认值。 */
@@ -147,4 +177,5 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   selectionAddEnabled: true, // 是否启用选中文本后浮动「添加提示词」入口
   contextRecommendEnabled: true, // 是否启用基于聊天上下文的提示词推荐
   dataManagementEnabled: true, // 数据管理：卡片菜单/词库菜单展示「数据管理」入口
+  promptSortMode: "smart", // 默认保持既有智能排序；用户确认后才切换到手动拖拽
 };

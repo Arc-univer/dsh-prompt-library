@@ -25,6 +25,7 @@ import { insertVariableAt } from "../data/TemplateVariables.js";
 import { DialogCloseButton } from "../common/DialogCloseButton.js";
 import { BookIcon } from "../common/BookIcon.js";
 import type { TransferPrompt } from "../../utils/data-formats.js";
+import type { PromptScope } from "../../../types.js";
 
 const MONO =
   'var(--dsw-font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Helvetica, Arial, sans-serif)';
@@ -61,6 +62,11 @@ interface EditableEntry {
   summary?: string;
   /** 来源格式徽标。 */
   source: "json" | "csv" | "md" | "txt";
+  /** JSON/CSV 备份元数据：不展示编辑，但导入时原样保留。 */
+  id?: string;
+  scope?: PromptScope;
+  projectPath?: string;
+  sortOrder?: number;
   checked: boolean;
 }
 
@@ -229,6 +235,10 @@ export function ImportEditModal(props: {
       body: e.body,
       tags: (e.tags ?? [])[0] ?? "",
       ...(e.summary?.trim() ? { summary: e.summary.trim() } : {}),
+      ...(e.id ? { id: e.id } : {}),
+      ...(e.scope ? { scope: e.scope } : {}),
+      ...(e.projectPath ? { projectPath: e.projectPath } : {}),
+      ...(typeof e.sortOrder === "number" ? { sortOrder: e.sortOrder } : {}),
       source: e.source ?? "txt",
       checked: true,
     }));
@@ -362,8 +372,12 @@ export function ImportEditModal(props: {
     }
     setSaving(true);
     const payload = checked.map((e) => ({
+      ...(e.id ? { id: e.id } : {}),
       title: e.title.trim(),
       body: e.body,
+      ...(e.scope ? { scope: e.scope } : {}),
+      ...(e.projectPath ? { projectPath: e.projectPath } : {}),
+      ...(typeof e.sortOrder === "number" ? { sortOrder: e.sortOrder } : {}),
       // 有摘要即视为已 AI 完善：入库时标记 aiRefined，使词库内的 AI 状态与导入页一致
       ...(e.summary?.trim()
         ? { summary: e.summary.trim(), aiRefined: true }

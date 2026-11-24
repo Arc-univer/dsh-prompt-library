@@ -45,6 +45,7 @@ import { ImportEditModal } from "./ImportEditModal.js";
 import {
   parseImportFile,
   type TransferFormat,
+  type TransferPrompt,
 } from "../../utils/data-formats.js";
 
 const MONO =
@@ -187,9 +188,7 @@ export function ImportExportModal(props: {
   const [skillImportOpen, setSkillImportOpen] = useState(false);
   // 通用格式导入弹窗（由所选文件解析出的初始条目）
   const [importEditOpen, setImportEditOpen] = useState(false);
-  const [importEntries, setImportEntries] = useState<
-    Array<{ title: string; body: string; tags?: string[] }>
-  >([]);
+  const [importEntries, setImportEntries] = useState<TransferPrompt[]>([]);
   const [exportFormat, setExportFormat] = useState<TransferFormat>("json");
   // 技能导出弹窗（由勾选提示词转换的初始条目）
   const [skillExportOpen, setSkillExportOpen] = useState(false);

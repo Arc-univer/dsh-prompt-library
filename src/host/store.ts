@@ -18,8 +18,9 @@ import { randomUUID } from "node:crypto";
 import { createDatabase } from "./node-sqlite.js";
 import type { DatabaseSync } from "node:sqlite";
 import { load, dump } from "js-yaml";
-import type { PluginSettings, Prompt, TrashItem } from "../types.js";
+import type { PluginSettings, Prompt, PromptProject, PromptScope, TrashItem } from "../types.js";
 import { clampTitle, DEFAULT_SETTINGS, TITLE_MAX_LEN } from "../types.js";
+import { normalizePromptProjectPath } from "./project-paths.js";
 import {
   dbPath,
   pluginSettingsPath,
@@ -56,9 +57,34 @@ function getDb(): DatabaseSync {
       aiRefined    INTEGER NOT NULL DEFAULT 0,
       updatedAt    INTEGER NOT NULL,
       usageCount   INTEGER NOT NULL DEFAULT 0,
-      lastUsedAt   INTEGER NOT NULL DEFAULT 0
+      lastUsedAt   INTEGER NOT NULL DEFAULT 0,
+      scope        TEXT NOT NULL DEFAULT 'global',
+      projectPath  TEXT,
+      projectKey   TEXT,
+      sortOrder    REAL NOT NULL DEFAULT 0
     );
   `);
+  // 兼容项目归属与手动排序之前的库：增量补列，历史提示词默认全局。
+  try {
+    next.exec("ALTER TABLE prompts ADD COLUMN scope TEXT NOT NULL DEFAULT 'global'");
+  } catch {
+    /* 列已存在，忽略 */
+  }
+  try {
+    next.exec("ALTER TABLE prompts ADD COLUMN projectPath TEXT");
+  } catch {
+    /* 列已存在，忽略 */
+  }
+  try {
+    next.exec("ALTER TABLE prompts ADD COLUMN projectKey TEXT");
+  } catch {
+    /* 列已存在，忽略 */
+  }
+  try {
+    next.exec("ALTER TABLE prompts ADD COLUMN sortOrder REAL NOT NULL DEFAULT 0");
+  } catch {
+    /* 列已存在，忽略 */
+  }
   // 兼容早期的库：若缺少 createdAt 列则补建，并回填为 updatedAt（近似创建时间）。
   try {
     next.exec("ALTER TABLE prompts ADD COLUMN createdAt INTEGER NOT NULL DEFAULT 0");
@@ -103,9 +129,40 @@ function getDb(): DatabaseSync {
       usageCount   INTEGER NOT NULL DEFAULT 0,
       lastUsedAt   INTEGER NOT NULL DEFAULT 0,
       createdAt    INTEGER NOT NULL DEFAULT 0,
-      deletedAt    INTEGER NOT NULL
+      deletedAt    INTEGER NOT NULL,
+      aiRefinedAt  INTEGER NOT NULL DEFAULT 0,
+      scope        TEXT NOT NULL DEFAULT 'global',
+      projectPath  TEXT,
+      projectKey   TEXT,
+      sortOrder    REAL NOT NULL DEFAULT 0
     );
   `);
+  // 回收站同步补齐提示词归属、排序与 AI 完善时间，确保恢复后不丢元数据。
+  try {
+    next.exec("ALTER TABLE trash ADD COLUMN aiRefinedAt INTEGER NOT NULL DEFAULT 0");
+  } catch {
+    /* 列已存在，忽略 */
+  }
+  try {
+    next.exec("ALTER TABLE trash ADD COLUMN scope TEXT NOT NULL DEFAULT 'global'");
+  } catch {
+    /* 列已存在，忽略 */
+  }
+  try {
+    next.exec("ALTER TABLE trash ADD COLUMN projectPath TEXT");
+  } catch {
+    /* 列已存在，忽略 */
+  }
+  try {
+    next.exec("ALTER TABLE trash ADD COLUMN projectKey TEXT");
+  } catch {
+    /* 列已存在，忽略 */
+  }
+  try {
+    next.exec("ALTER TABLE trash ADD COLUMN sortOrder REAL NOT NULL DEFAULT 0");
+  } catch {
+    /* 列已存在，忽略 */
+  }
   // 插件级元数据表（key-value），用于「首次欢迎」等一次性标记。
   next.exec(`
     CREATE TABLE IF NOT EXISTS meta (
@@ -182,6 +239,9 @@ function getDb(): DatabaseSync {
   syncTagsFromPrompts(next);
   // 首次使用（词库为空）时写入一条默认提示词与标签，作为上手引导。
   seedDefaultPromptIfEmpty(next);
+  // 手动顺序只初始化一次：继承升级前的智能排序结果，避免升级后列表突变。
+  initializePromptSortOrder(next);
+  next.exec("CREATE INDEX IF NOT EXISTS idx_prompts_scope_order ON prompts (scope, projectKey, sortOrder)");
   db = next;
   // 一次性迁移历史 JSON 数据（失败静默，不影响使用）。
   migrateLegacyJsonIfNeeded().catch(() => {});
@@ -276,6 +336,8 @@ function seedDefaultPromptIfEmpty(cur: DatabaseSync): void {
     usageCount: 0,
     lastUsedAt: 0,
     aiRefined: false,
+    scope: "global",
+    sortOrder: 0,
   };
   cur.prepare(
     `INSERT INTO prompts
@@ -358,6 +420,10 @@ interface PromptRow {
   createdAt: number;
   usageCount: number;
   lastUsedAt: number;
+  scope: PromptScope | null;
+  projectPath: string | null;
+  projectKey: string | null;
+  sortOrder: number | null;
 }
 
 function rowToPrompt(r: PromptRow): Prompt {
@@ -374,6 +440,10 @@ function rowToPrompt(r: PromptRow): Prompt {
     createdAt: r.createdAt,
     usageCount: r.usageCount,
     lastUsedAt: r.lastUsedAt,
+    scope: r.scope === "project" ? "project" : "global",
+    projectPath: r.scope === "project" ? (r.projectPath ?? undefined) : undefined,
+    projectKey: r.scope === "project" ? (r.projectKey ?? undefined) : undefined,
+    sortOrder: typeof r.sortOrder === "number" ? r.sortOrder : 0,
   };
 }
 
@@ -434,34 +504,13 @@ function syncTagsFromPrompts(cur: DatabaseSync): void {
 
 // ── 回收站行映射 ────────────────────────────────────────────────────────────
 
-interface TrashRow {
-  id: string;
-  title: string;
-  body: string;
-  tags: string | null;
-  summary: string | null;
-  sourceBody: string | null;
-  aiRefined: number;
-  updatedAt: number;
-  createdAt: number;
-  usageCount: number;
-  lastUsedAt: number;
+interface TrashRow extends PromptRow {
   deletedAt: number;
 }
 
 function rowToTrash(r: TrashRow): TrashItem {
   return {
-    id: r.id,
-    title: r.title,
-    body: r.body,
-    tags: r.tags ? (JSON.parse(r.tags) as string[]) : undefined,
-    summary: r.summary ?? undefined,
-    sourceBody: r.sourceBody ?? undefined,
-    aiRefined: r.aiRefined === 1,
-    updatedAt: r.updatedAt,
-    createdAt: r.createdAt,
-    usageCount: r.usageCount,
-    lastUsedAt: r.lastUsedAt,
+    ...rowToPrompt(r),
     deletedAt: r.deletedAt,
   };
 }
@@ -558,6 +607,49 @@ function migrateMdContentToDb(): void {
  */
 const FRESH_MS = 7 * 24 * 60 * 60 * 1000;
 
+/** 规范化提示词归属；项目提示词必须有明确目录，全局提示词清空项目字段。 */
+function normalizePromptScope(
+  scope: PromptScope | undefined,
+  projectPath: string | undefined,
+): Pick<Prompt, "scope" | "projectPath" | "projectKey"> {
+  if (scope !== "project") return { scope: "global" };
+  const project = normalizePromptProjectPath(projectPath ?? "");
+  return { scope: "project", projectPath: project.path, projectKey: project.key };
+}
+
+/** 手动排序比较：权重优先，权重相同按更新时间倒序保证结果稳定。 */
+function compareManualOrder(a: Prompt, b: Prompt): number {
+  return a.sortOrder - b.sortOrder || b.updatedAt - a.updatedAt || a.id.localeCompare(b.id);
+}
+
+/** 首次加入手动排序时，把当前智能排序结果固化为递增权重。 */
+function initializePromptSortOrder(cur: DatabaseSync): void {
+  const marker = cur
+    .prepare("SELECT value FROM meta WHERE key = 'promptSortOrderInitialized'")
+    .get() as { value: string } | undefined;
+  if (marker) return;
+  const rows = cur.prepare("SELECT * FROM prompts").all() as unknown as PromptRow[];
+  const ordered = sortPrompts(rows.map(rowToPrompt));
+  const update = cur.prepare("UPDATE prompts SET sortOrder = ? WHERE id = ?");
+  cur.exec("BEGIN");
+  try {
+    ordered.forEach((prompt, index) => update.run((index + 1) * 1024, prompt.id));
+    cur.prepare("INSERT INTO meta (key, value) VALUES ('promptSortOrderInitialized', '1')").run();
+    cur.exec("COMMIT");
+  } catch (error) {
+    cur.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+/** 重新编号，消除导入或恢复造成的相同权重，同时保持既有相对顺序。 */
+function reindexPromptOrder(cur: DatabaseSync): void {
+  const rows = cur.prepare("SELECT * FROM prompts").all() as unknown as PromptRow[];
+  const ordered = rows.map(rowToPrompt).sort(compareManualOrder);
+  const update = cur.prepare("UPDATE prompts SET sortOrder = ? WHERE id = ?");
+  ordered.forEach((prompt, index) => update.run((index + 1) * 1024, prompt.id));
+}
+
 function sortPrompts(prompts: Prompt[]): Prompt[] {
   const now = Date.now();
   // 1. 时效期内的新提示词排在最前（按创建时间降序）
@@ -628,6 +720,60 @@ export function listPrompts(): Promise<Prompt[]> {
   }
 }
 
+/** 汇总项目专属提示词，供数据管理按项目筛选与分组。 */
+export function listPromptProjects(): Promise<PromptProject[]> {
+  try {
+    const projects = new Map<string, PromptProject>();
+    for (const prompt of findAll()) {
+      if (prompt.scope !== "project" || !prompt.projectPath) continue;
+      const normalized = normalizePromptProjectPath(prompt.projectPath);
+      const key = prompt.projectKey || normalized.key;
+      const existing = projects.get(key);
+      if (existing) existing.count = (existing.count ?? 0) + 1;
+      else projects.set(key, { ...normalized, key, count: 1 });
+    }
+    return Promise.resolve(
+      [...projects.values()].sort((a, b) => a.name.localeCompare(b.name) || a.key.localeCompare(b.key)),
+    );
+  } catch (e) {
+    return Promise.reject(e);
+  }
+}
+
+/**
+ * 保存完整手动顺序。客户端提交全部活动提示词 id，隐藏条目也保留在顺序中；
+ * 全覆盖校验避免并发新增或漏传时悄悄破坏其它项目的顺序。
+ */
+export function reorderPrompts(orderedIds: string[]): Promise<Prompt[]> {
+  try {
+    const cur = getDb();
+    const all = findAll();
+    const byId = new Map(all.map((prompt) => [prompt.id, prompt]));
+    const uniqueIds = new Set(orderedIds);
+    if (
+      orderedIds.length !== all.length ||
+      uniqueIds.size !== orderedIds.length ||
+      orderedIds.some((id) => !byId.has(id))
+    ) {
+      throw new Error("order list must include every active prompt exactly once");
+    }
+    const update = cur.prepare("UPDATE prompts SET sortOrder = ? WHERE id = ?");
+    cur.exec("BEGIN");
+    try {
+      orderedIds.forEach((id, index) => update.run((index + 1) * 1024, id));
+      cur.exec("COMMIT");
+    } catch (error) {
+      cur.exec("ROLLBACK");
+      throw error;
+    }
+    return Promise.resolve(
+      orderedIds.map((id, index) => ({ ...byId.get(id)!, sortOrder: (index + 1) * 1024 })),
+    );
+  } catch (e) {
+    return Promise.reject(e);
+  }
+}
+
 /** 取某提示词上次生成的技能名；未关联过则返回 undefined。 */
 export function getSkillNameForPrompt(promptId: string): string | undefined {
   if (!db) return undefined;
@@ -672,11 +818,18 @@ export function createPrompt(input: {
   body: string;
   tags?: string[];
   summary?: string;
+  scope?: PromptScope;
+  projectPath?: string;
 }): Promise<Prompt> {
   try {
     const now = Date.now();
     // 标签写入标签表（集中管理），仅保留单个标签
     const tags = ensureTags(Array.isArray(input.tags) ? input.tags : []).slice(0, 1);
+    const ownership = normalizePromptScope(input.scope, input.projectPath);
+    const cur = getDb();
+    const orderRow = cur.prepare("SELECT COALESCE(MIN(sortOrder), 1024) AS minOrder FROM prompts").get() as {
+      minOrder: number;
+    };
     const prompt: Prompt = {
       id: randomUUID(),
       title: clampTitle(input.title.trim()),
@@ -687,13 +840,16 @@ export function createPrompt(input: {
       createdAt: now,
       usageCount: 0,
       lastUsedAt: 0,
+      ...ownership,
+      // 新建条目在手动模式下置顶；智能排序仍按既有规则展示。
+      sortOrder: orderRow.minOrder - 1024,
     };
-    const cur = getDb();
     cur
       .prepare(
         `INSERT INTO prompts
-           (id, title, body, tags, summary, aiRefined, updatedAt, usageCount, lastUsedAt, createdAt)
-         VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?)`,
+           (id, title, body, tags, summary, aiRefined, updatedAt, usageCount, lastUsedAt, createdAt,
+            scope, projectPath, projectKey, sortOrder)
+         VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         prompt.id,
@@ -705,6 +861,10 @@ export function createPrompt(input: {
         0,
         0,
         now,
+        prompt.scope,
+        prompt.projectPath ?? null,
+        prompt.projectKey ?? null,
+        prompt.sortOrder,
       );
     // 用用户配置的真实上限做后台淘汰（getSettingsSync 只回默认值）
     void getSettings().then((s) => enforceMaxCount(s.maxPromptCount));
@@ -728,6 +888,8 @@ export function updatePrompt(
     aiRefinedAt?: number;
     usageCount?: number;
     lastUsedAt?: number;
+    scope?: PromptScope;
+    projectPath?: string;
   },
 ): Promise<Prompt | undefined> {
   try {
@@ -737,6 +899,10 @@ export function updatePrompt(
     const current = rowToPrompt(existing);
     // 标签更新时同步进标签表（集中管理），仅保留单个标签
     const nextTags = patch.tags !== undefined ? ensureTags(patch.tags).slice(0, 1) : undefined;
+    const ownership = normalizePromptScope(
+      patch.scope ?? current.scope,
+      patch.projectPath ?? current.projectPath,
+    );
     const aiRefined = patch.aiRefined !== undefined ? patch.aiRefined : current.aiRefined;
     // AI 完善：首次从 false → true 时记录完善时间；显式传入时间戳则直接采用
     const aiRefinedAt =
@@ -757,12 +923,14 @@ export function updatePrompt(
       updatedAt: Date.now(),
       usageCount: patch.usageCount !== undefined ? patch.usageCount : current.usageCount,
       lastUsedAt: patch.lastUsedAt !== undefined ? patch.lastUsedAt : current.lastUsedAt,
+      ...ownership,
     };
     cur
       .prepare(
         `UPDATE prompts SET
            title = ?, body = ?, tags = ?, summary = ?, sourceBody = ?,
-           aiRefined = ?, aiRefinedAt = ?, updatedAt = ?, usageCount = ?, lastUsedAt = ?
+           aiRefined = ?, aiRefinedAt = ?, updatedAt = ?, usageCount = ?, lastUsedAt = ?,
+           scope = ?, projectPath = ?, projectKey = ?
          WHERE id = ?`,
       )
       .run(
@@ -776,6 +944,9 @@ export function updatePrompt(
         next.updatedAt,
         next.usageCount,
         next.lastUsedAt,
+        next.scope,
+        next.projectPath ?? null,
+        next.projectKey ?? null,
         id,
       );
     // 版本历史：内容有实质变化时快照。首次 AI 完善记为 refine，其余记为 update。
@@ -855,8 +1026,9 @@ export function deletePrompt(id: string): Promise<boolean> {
       cur
         .prepare(
           `INSERT INTO trash
-             (id, title, body, tags, summary, sourceBody, aiRefined, updatedAt, usageCount, lastUsedAt, createdAt, deletedAt)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             (id, title, body, tags, summary, sourceBody, aiRefined, updatedAt, usageCount, lastUsedAt,
+              createdAt, deletedAt, aiRefinedAt, scope, projectPath, projectKey, sortOrder)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           existing.id,
@@ -871,6 +1043,11 @@ export function deletePrompt(id: string): Promise<boolean> {
           existing.lastUsedAt,
           existing.createdAt,
           now,
+          existing.aiRefinedAt ?? 0,
+          existing.scope ?? "global",
+          existing.projectPath,
+          existing.projectKey,
+          existing.sortOrder ?? 0,
         );
       cur.prepare("DELETE FROM prompts WHERE id = ?").run(id);
       cur.exec("COMMIT");
@@ -917,8 +1094,9 @@ export function restorePrompts(ids: string[]): Promise<number> {
     const select = cur.prepare("SELECT * FROM trash WHERE id = ?");
     const insert = cur.prepare(
       `INSERT OR REPLACE INTO prompts
-         (id, title, body, tags, summary, sourceBody, aiRefined, updatedAt, usageCount, lastUsedAt, createdAt)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (id, title, body, tags, summary, sourceBody, aiRefined, aiRefinedAt, updatedAt, usageCount,
+          lastUsedAt, createdAt, scope, projectPath, projectKey, sortOrder)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     const remove = cur.prepare("DELETE FROM trash WHERE id = ?");
     let restored = 0;
@@ -938,14 +1116,21 @@ export function restorePrompts(ids: string[]): Promise<number> {
           row.summary,
           row.sourceBody,
           row.aiRefined,
+          row.aiRefinedAt ?? 0,
           row.updatedAt,
           row.usageCount,
           row.lastUsedAt,
           row.createdAt,
+          row.scope ?? "global",
+          row.projectPath,
+          row.projectKey,
+          row.sortOrder ?? 0,
         );
         remove.run(id);
         restored++;
       }
+      // 恢复的历史顺序可能与其它条目权重相同，统一重编号但不改变相对顺序。
+      reindexPromptOrder(cur);
       cur.exec("COMMIT");
     } catch (e) {
       cur.exec("ROLLBACK");
@@ -996,7 +1181,8 @@ export function emptyTrash(): Promise<number> {
 
 /** 导出的备份文件结构。 */
 export interface PromptBackup {
-  version: 1;
+  /** v2 增加项目归属与手动顺序；导入仍兼容 v1。 */
+  version: 2;
   exportedAt: number;
   prompts: Prompt[];
 }
@@ -1010,7 +1196,7 @@ export function exportPrompts(ids?: string[]): Promise<PromptBackup> {
     const all = findAll().sort((a, b) => a.title.localeCompare(b.title));
     const prompts =
       ids && ids.length > 0 ? all.filter((p) => ids.includes(p.id)) : all;
-    return Promise.resolve({ version: 1, exportedAt: Date.now(), prompts });
+    return Promise.resolve({ version: 2, exportedAt: Date.now(), prompts });
   } catch (e) {
     return Promise.reject(e);
   }
@@ -1044,16 +1230,23 @@ export function importPrompts(
     const cur = getDb();
     const upsert = cur.prepare(`
       INSERT INTO prompts
-        (id, title, body, tags, summary, sourceBody, aiRefined, updatedAt, usageCount, lastUsedAt, createdAt)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (id, title, body, tags, summary, sourceBody, aiRefined, aiRefinedAt, updatedAt, usageCount,
+         lastUsedAt, createdAt, scope, projectPath, projectKey, sortOrder)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         title = excluded.title, body = excluded.body, tags = excluded.tags,
         summary = excluded.summary, sourceBody = excluded.sourceBody,
-        aiRefined = excluded.aiRefined, updatedAt = excluded.updatedAt,
-        usageCount = excluded.usageCount, lastUsedAt = excluded.lastUsedAt,
-        createdAt = excluded.createdAt
+        aiRefined = excluded.aiRefined, aiRefinedAt = excluded.aiRefinedAt,
+        updatedAt = excluded.updatedAt, usageCount = excluded.usageCount,
+        lastUsedAt = excluded.lastUsedAt, createdAt = excluded.createdAt,
+        scope = excluded.scope, projectPath = excluded.projectPath,
+        projectKey = excluded.projectKey, sortOrder = excluded.sortOrder
     `);
     const now = Date.now();
+    const orderRow = cur.prepare("SELECT COALESCE(MIN(sortOrder), 1024) AS minOrder FROM prompts").get() as {
+      minOrder: number;
+    };
+    let nextImportOrder = orderRow.minOrder - 1024;
     let imported = 0;
     let updated = 0;
     let skipped = 0;
@@ -1093,13 +1286,34 @@ export function importPrompts(
         const summary = typeof p.summary === "string" ? p.summary : undefined;
         const sourceBody = typeof p.sourceBody === "string" ? p.sourceBody : undefined;
         const aiRefined = p.aiRefined ? 1 : 0;
+        const aiRefinedAt = typeof p.aiRefinedAt === "number" ? p.aiRefinedAt : 0;
+        let ownership: Pick<Prompt, "scope" | "projectPath" | "projectKey">;
+        try {
+          ownership = normalizePromptScope(
+            p.scope === "project" ? "project" : "global",
+            typeof p.projectPath === "string" ? p.projectPath : undefined,
+          );
+        } catch {
+          // 明确标记为项目提示词却缺少有效目录时跳过，避免悄悄改成全局。
+          skipped++;
+          items.push({ title, status: "skipped" });
+          continue;
+        }
         const updatedAt = typeof p.updatedAt === "number" ? p.updatedAt : now;
         const createdAt = typeof p.createdAt === "number" ? p.createdAt : updatedAt;
         // 普通导入视为「新数据」：使用次数与上次使用时间一律归零（含覆盖更新的已有条），
         // 避免沿用导出文件里的使用统计；仅备份恢复（keepUsage）才保留原次数。
         const usageCount = opts?.keepUsage ? (typeof p.usageCount === "number" ? p.usageCount : 0) : 0;
         const lastUsedAt = opts?.keepUsage ? (typeof p.lastUsedAt === "number" ? p.lastUsedAt : 0) : 0;
-        const existing = cur.prepare("SELECT id FROM prompts WHERE id = ?").get(id);
+        const existing = cur.prepare("SELECT id, sortOrder FROM prompts WHERE id = ?").get(id) as
+          | { id: string; sortOrder: number }
+          | undefined;
+        let sortOrder = existing?.sortOrder ?? nextImportOrder;
+        if (typeof p.sortOrder === "number" && Number.isFinite(p.sortOrder)) {
+          sortOrder = p.sortOrder;
+        } else if (!existing) {
+          nextImportOrder -= 1024;
+        }
         upsert.run(
           id,
           title,
@@ -1108,15 +1322,22 @@ export function importPrompts(
           summary ?? null,
           sourceBody ?? null,
           aiRefined,
+          aiRefinedAt,
           updatedAt,
           usageCount,
           lastUsedAt,
           createdAt,
+          ownership.scope,
+          ownership.projectPath ?? null,
+          ownership.projectKey ?? null,
+          sortOrder,
         );
         if (existing) updated++;
         else imported++;
         items.push({ title, status: existing ? "updated" : "imported" });
       }
+      // 合并外部顺序与库内顺序，消除重复权重并保持稳定的相对位置。
+      reindexPromptOrder(cur);
       cur.exec("COMMIT");
     } catch (e) {
       cur.exec("ROLLBACK");
@@ -1424,6 +1645,9 @@ export async function readGlobalLocale(): Promise<string> {
 }
 
 export function updateSettings(patch: Partial<PluginSettings>): Promise<PluginSettings> {
+  if (patch.promptSortMode !== undefined && patch.promptSortMode !== "smart" && patch.promptSortMode !== "manual") {
+    return Promise.reject(new Error("invalid promptSortMode"));
+  }
   return readSettingsRaw().then(async (settings) => {
     const next: PluginSettings = { ...settings, ...patch };
     await writeSettingsRaw(next);

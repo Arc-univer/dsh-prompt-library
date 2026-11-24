@@ -16,7 +16,7 @@ import {
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from "react";
-import type { PluginSettings, Prompt } from "../../../types.js";
+import type { PluginSettings, Prompt, PromptScope } from "../../../types.js";
 import { clampTitle, DEFAULT_SETTINGS } from "../../../types.js";
 import {
   createPrompt as apiCreate,
@@ -27,6 +27,7 @@ import {
   updatePrompt as apiUpdate,
   usePrompt as apiUse,
   polishPrompt as apiPolish,
+  reorderPrompts as apiReorder,
 } from "../../utils/api.js";
 import { Button } from "@deepseek-ai/dsh-client-ui-primitives";
 import { PL_BUTTON_CSS, plBtn } from "../../utils/button-style.js";
@@ -39,6 +40,13 @@ import { rowBackground } from "../../utils/theme.js";
 import { notifyDataChanged, useDataChanged, useExportDownloaded, useFillDraft } from "../../utils/data-sync.js";
 import { type PLT, type PLTranslate, usePLT } from "../../utils/i18n.js";
 import { SearchBox, TagFilterSelect } from "../common/SearchBox.js";
+import { PromptProjectFilterSelect } from "../common/PromptProjectFilterSelect.js";
+import { PromptSortControls } from "../common/PromptSortControls.js";
+import { PromptDragHandle } from "../common/PromptDragHandle.js";
+import { usePromptProjects } from "../../hooks/usePromptProjects.js";
+import { usePromptSortMode } from "../../hooks/usePromptSortMode.js";
+import { filterPromptsByProject, type PromptProjectFilter } from "../../utils/prompt-projects.js";
+import { mergeVisiblePromptOrder, movePromptToTarget, sortPromptsForMode } from "../../utils/prompt-order.js";
 import {
   applyVariables,
   extractVariables,
@@ -53,6 +61,8 @@ import {
  */
 interface ButtonProps {
   useInput: <T>(selector: (s: { draft: string }) => T) => T;
+  /** 可选会话快照：传入后可严格按 sessionId 解析项目，避免多会话串用。 */
+  useSession?: <T>(selector: (s: { sessionId?: string }) => T) => T;
   inputActions: {
     setDraft: (text: string) => void;
     submit?: () => void;
@@ -633,9 +643,13 @@ function useSettings(): [PluginSettings, boolean] {
 // ── 主组件 ───────────────────────────────────────────────────────────────
 
 export function PromptLibraryButton(props: ButtonProps): ReactNode {
-  const { inputActions, useInput, t } = props;
+  const { inputActions, useInput, useSession, t } = props;
   const T = usePLT(t);
   const draft = useInput((s) => s.draft);
+  const sessionId = useSession?.((s) => s.sessionId);
+  const { currentProject, projects } = usePromptProjects(sessionId);
+  const { sortMode, changeSortMode } = usePromptSortMode();
+  const [projectFilter, setProjectFilter] = useState<PromptProjectFilter>("current");
 
   const [open, setOpen] = useState(false);
   const [prompts, setPrompts] = useState<Prompt[]>([]);
@@ -650,11 +664,22 @@ export function PromptLibraryButton(props: ButtonProps): ReactNode {
   const clearSearch = useCallback(() => setQuery(""), []);
   // 标签过滤：选中后仅显示含该标签的提示词（与搜索词叠加）
   const [tagFilter, setTagFilter] = useState("");
-  const [editor, setEditor] = useState<{ mode: "none" | "create" | "edit"; id?: string; title: string; body: string; tags: string }>({
-    mode: "none", title: "", body: "", tags: ""
+  const [editor, setEditor] = useState<{
+    mode: "none" | "create" | "edit";
+    id?: string;
+    title: string;
+    body: string;
+    tags: string;
+    scope: PromptScope;
+    projectPath?: string;
+  }>({
+    mode: "none", title: "", body: "", tags: "", scope: "global"
   });
   // 编辑表单正文输入框引用：供「插入变量 {{}}」定位光标
   const bodyRef = useRef<HTMLTextAreaElement>(null);
+  // 手动拖拽：记录源条目与保存状态，保存期间禁止再次拖动。
+  const [draggingId, setDraggingId] = useState<string | null>(null);
+  const [orderSaving, setOrderSaving] = useState(false);
   const [toast, setToast] = useState<{ visible: boolean; text?: string }>({ visible: false });
   // 模板变量填充弹窗：插入含 {{变量}} 的提示词前弹出
   // fromOverlay：由 # 浮层触发，确认后需替换「#」及其后的筛选内容
@@ -749,7 +774,7 @@ export function PromptLibraryButton(props: ButtonProps): ReactNode {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         if (editor.mode !== "none") {
-          setEditor({ mode: "none", title: "", body: "", tags: "" });
+          setEditor({ mode: "none", title: "", body: "", tags: "", scope: "global" });
         } else {
           setOpen(false);
         }
@@ -759,9 +784,19 @@ export function PromptLibraryButton(props: ButtonProps): ReactNode {
     return () => document.removeEventListener("keydown", onKey);
   }, [open, editor.mode]);
 
+  // 先确定排序和项目范围，再叠加标签与关键词过滤；# 浮层固定使用“全局+当前项目”。
+  const orderedPrompts = useMemo(() => sortPromptsForMode(prompts, sortMode), [prompts, sortMode]);
+  const currentProjectPrompts = useMemo(
+    () => filterPromptsByProject(orderedPrompts, "current", currentProject),
+    [orderedPrompts, currentProject],
+  );
+  const scopedPrompts = useMemo(
+    () => filterPromptsByProject(orderedPrompts, projectFilter, currentProject),
+    [orderedPrompts, projectFilter, currentProject],
+  );
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    return prompts.filter((p) => {
+    return scopedPrompts.filter((p) => {
       // 标签过滤（与搜索词叠加）
       if (tagFilter && !(p.tags ?? []).includes(tagFilter)) return false;
       if (q) {
@@ -770,16 +805,20 @@ export function PromptLibraryButton(props: ButtonProps): ReactNode {
       }
       return true;
     });
-  }, [prompts, query, tagFilter]);
+  }, [scopedPrompts, query, tagFilter]);
 
   // ── 翻页 ───────────────────────────────────────────────────────────────────
   const PAGE_SIZE = 10;
   const [page, setPage] = useState(1);
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
-  // 搜索词/标签或数据变化时回到第 1 页
+  // 筛选或排序模式变化时回到第 1 页；拖拽更新 prompts 时不重置页码。
   useEffect(() => {
     setPage(1);
-  }, [query, tagFilter, prompts]);
+  }, [query, tagFilter, projectFilter, sortMode, currentProject?.key]);
+  // 删除或外部数据变化导致总页数减少时，仅校正越界页码。
+  useEffect(() => {
+    setPage((current) => Math.min(current, totalPages));
+  }, [totalPages]);
   // 当前页数据切片
   const pageItems = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
 
@@ -820,7 +859,7 @@ export function PromptLibraryButton(props: ButtonProps): ReactNode {
   );
 
   // # 键触发浮层：必须位于 selectFromOverlay 定义之后（回调以引用方式传入）
-  useTildaTrigger(settings, prompts, inputActions, draft, T, selectFromOverlay);
+  useTildaTrigger(settings, currentProjectPrompts, inputActions, draft, T, selectFromOverlay);
 
   // 用提示词正文覆盖当前输入框内容
   const overwrite = useCallback(
@@ -881,14 +920,23 @@ export function PromptLibraryButton(props: ButtonProps): ReactNode {
 
   const editing = editor.mode !== "none";
 
-  const NO_EDITOR = { mode: "none" as const, title: "", body: "", tags: "" };
+  const NO_EDITOR = { mode: "none" as const, title: "", body: "", tags: "", scope: "global" as const };
 
-  const startCreate = () => setEditor({ mode: "create", title: "", body: "", tags: "" });
+  const startCreate = () => setEditor({
+    mode: "create",
+    title: "",
+    body: "",
+    tags: "",
+    scope: projectFilter !== "global" && currentProject ? "project" : "global",
+    projectPath: currentProject?.path,
+  });
 
   const startEdit = (p: Prompt) => setEditor({
     mode: "edit", id: p.id,
     title: p.title, body: p.body,
     tags: (p.tags ?? []).join("#"),
+    scope: p.scope,
+    projectPath: p.projectPath,
   });
 
   const saveEditor = () => {
@@ -898,24 +946,56 @@ export function PromptLibraryButton(props: ButtonProps): ReactNode {
       setError(T("pl.requireTitleBody"));
       return;
     }
+    const projectPath = editor.projectPath || currentProject?.path;
+    if (editor.scope === "project" && !projectPath) {
+      setError(T("pl.project.pathRequired"));
+      return;
+    }
     const tags = editor.tags.split("#").map((t) => t.trim()).filter(Boolean);
+    const ownership = { scope: editor.scope, projectPath: editor.scope === "project" ? projectPath : undefined };
     const done = () => {
       setEditor(NO_EDITOR);
       // 通知两侧面板同步刷新（本面板通过事件统一重新加载）
       notifyDataChanged();
     };
     if (editor.mode === "create") {
-      apiCreate({ title, body, tags }).then((p) => {
+      apiCreate({ title, body, tags, ...ownership }).then((p) => {
         markRecent(p.id);
         done();
       }, (e: unknown) =>
         setError(e instanceof Error ? e.message : String(e)),
       );
     } else if (editor.mode === "edit" && editor.id) {
-      apiUpdate(editor.id, { title, body, tags }).then(done, (e: unknown) =>
+      apiUpdate(editor.id, { title, body, tags, ...ownership }).then(done, (e: unknown) =>
         setError(e instanceof Error ? e.message : String(e)),
       );
     }
+  };
+
+  // 仅手动模式且无搜索/标签过滤时开放拖拽，避免隐藏条目造成顺序歧义。
+  const canDrag = sortMode === "manual" && !query.trim() && !tagFilter && !orderSaving;
+  const reorder = (sourceId: string, targetId: string): void => {
+    if (!canDrag || sourceId === targetId) return;
+    const previous = prompts;
+    const nextVisible = movePromptToTarget(filtered, sourceId, targetId);
+    const nextComplete = mergeVisiblePromptOrder(prompts, nextVisible);
+    setPrompts(nextComplete);
+    setOrderSaving(true);
+    setError(null);
+    void apiReorder(nextComplete.map((prompt) => prompt.id))
+      .then((updated) => {
+        setPrompts(updated);
+        notifyDataChanged();
+      })
+      .catch((cause: unknown) => {
+        setPrompts(previous);
+        const reason = cause instanceof Error ? cause.message : String(cause);
+        setError(`${T("pl.sort.reorderFailed")}：${reason}`);
+      })
+      .finally(() => {
+        setOrderSaving(false);
+        setDraggingId(null);
+      });
   };
 
   const remove = (p: Prompt) => {
@@ -1210,6 +1290,21 @@ export function PromptLibraryButton(props: ButtonProps): ReactNode {
                     allLabel={T("pl.tagFilterAll")}
                   />
                 </div>
+                <div style={{ display: "flex", alignItems: "flex-start", gap: 8, marginTop: 8 }}>
+                  <PromptProjectFilterSelect
+                    value={projectFilter}
+                    onChange={setProjectFilter}
+                    currentProject={currentProject}
+                    projects={projects}
+                    grow
+                  />
+                  <PromptSortControls mode={sortMode} onChange={changeSortMode} compact />
+                </div>
+                {sortMode === "manual" && !canDrag && !orderSaving && (
+                  <div style={{ marginTop: 6, color: TONE.quiet, fontSize: 11, lineHeight: 1.5 }}>
+                    {T("pl.sort.dragFilteredHint")}
+                  </div>
+                )}
               </div>
             )}
 
@@ -1223,6 +1318,9 @@ export function PromptLibraryButton(props: ButtonProps): ReactNode {
               {phase === "error" && (
                 <div style={{ padding: "12px 16px", color: TONE.red, fontSize: 13 }}>{error}</div>
               )}
+              {!editing && phase === "ready" && error && (
+                <div role="alert" style={{ margin: "8px 12px 0", color: TONE.red, fontSize: 12, lineHeight: 1.5 }}>{error}</div>
+              )}
 
               {editing ? (
                 <div style={{ padding: "12px 16px", display: "flex", flexDirection: "column", gap: 9 }}>
@@ -1234,6 +1332,25 @@ export function PromptLibraryButton(props: ButtonProps): ReactNode {
                       style={inputStyle}
                     />
                   </label>
+                  <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 12, color: TONE.muted }}>
+                    {T("pl.project.scope")}
+                    <select
+                      value={editor.scope}
+                      onChange={(event) => {
+                        const scope = event.target.value as PromptScope;
+                        setEditor({ ...editor, scope, projectPath: scope === "project" ? (editor.projectPath || currentProject?.path) : undefined });
+                      }}
+                      style={inputStyle}
+                    >
+                      <option value="global">{T("pl.project.scopeGlobal")}</option>
+                      <option value="project">{T("pl.project.scopeProject")}</option>
+                    </select>
+                  </label>
+                  {editor.scope === "project" && (
+                    <div style={{ color: TONE.quiet, fontSize: 11.5, lineHeight: 1.5, wordBreak: "break-all" }}>
+                      {T("pl.project.path")}：{editor.projectPath || currentProject?.path || T("pl.project.notDetected")}
+                    </div>
+                  )}
                   <div style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 12, color: TONE.muted }}>
                     <span style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
                       {T("pl.bodyField")}
@@ -1280,6 +1397,17 @@ export function PromptLibraryButton(props: ButtonProps): ReactNode {
                   {pageItems.map((p) => (
                     <li
                       key={p.id}
+                      onDragOver={(event) => {
+                        if (!canDrag || !draggingId) return;
+                        event.preventDefault();
+                        event.dataTransfer.dropEffect = "move";
+                      }}
+                      onDrop={(event) => {
+                        if (!canDrag) return;
+                        event.preventDefault();
+                        const sourceId = event.dataTransfer.getData("text/plain") || draggingId || "";
+                        if (sourceId) reorder(sourceId, p.id);
+                      }}
                       style={{
                         display: "flex",
                         flexDirection: "column",
@@ -1287,8 +1415,9 @@ export function PromptLibraryButton(props: ButtonProps): ReactNode {
                         padding: "10px 11px 11px",
                         marginBottom: 2,
                         borderRadius: 11,
-                        background: "transparent",
-                        border: `1px dashed ${TONE.border}`,
+                        background: draggingId === p.id ? TONE.accentSoft : "transparent",
+                        border: `1px dashed ${draggingId === p.id ? TONE.accent : TONE.border}`,
+                        opacity: draggingId === p.id ? 0.65 : 1,
                         transition: "background-color .18s ease, border-color .18s ease",
                       }}
                       onMouseEnter={(e) => { e.currentTarget.style.background = TONE.row; e.currentTarget.style.borderColor = TONE.borderStrong; }}
@@ -1296,6 +1425,9 @@ export function PromptLibraryButton(props: ButtonProps): ReactNode {
                     >
                       {/* 标题行：标题 + 最近标记 + 标签胶囊（同行，标签完整显示） */}
                       <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0, flexWrap: "wrap" }}>
+                        {canDrag && (
+                          <PromptDragHandle promptId={p.id} onStart={setDraggingId} onEnd={() => setDraggingId(null)} />
+                        )}
                         <strong
                           style={{
                             fontSize: 13,
@@ -1316,6 +1448,12 @@ export function PromptLibraryButton(props: ButtonProps): ReactNode {
                             style={{ width: 7, height: 7, borderRadius: "50%", background: TONE.mint, display: "inline-block", flexShrink: 0 }}
                           />
                         )}
+                        <span
+                          data-tip={p.scope === "project" ? p.projectPath : T("pl.project.scopeGlobal")}
+                          style={{ flexShrink: 0, fontSize: 10.5, color: p.scope === "project" ? TONE.accent : TONE.quiet }}
+                        >
+                          {p.scope === "project" ? (p.projectPath?.replace(/\\/g, "/").split("/").filter(Boolean).pop() || T("pl.project.unknown")) : T("pl.project.global")}
+                        </span>
                         {(p.tags ?? []).slice(0, 3).map((tag) => (
                           <span
                             key={tag}

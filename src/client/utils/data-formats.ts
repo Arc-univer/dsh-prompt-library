@@ -11,17 +11,24 @@
  * 导出时把勾选的提示词序列化为所选格式供下载。
  */
 import { mdToPlainText } from "../../md-text.js";
+import type { PromptScope } from "../../types.js";
 
 /** 支持导入导出的格式。 */
 export type TransferFormat = "json" | "csv" | "md" | "txt";
 
 /** 导入导出使用的提示词数据（简化结构）。 */
 export interface TransferPrompt {
+  /** JSON/CSV 备份保留 id，用于合并导入时更新原条目。 */
+  id?: string;
   title: string;
   body: string;
   tags?: string[];
   /** 摘要（AI 摘要），导出时一并写入、导入时回读，保证往返不丢字段。 */
   summary?: string;
+  /** 项目归属与手动顺序；普通内容格式缺省为全局新条目。 */
+  scope?: PromptScope;
+  projectPath?: string;
+  sortOrder?: number;
   /** 来源格式（导入解析时标注，用于弹窗内来源徽标）。 */
   source?: TransferFormat;
 }
@@ -58,9 +65,17 @@ function parseJson(text: string): TransferPrompt[] {
     const it = item as Record<string, unknown>;
     if (typeof it.body !== "string" || !it.body.trim()) continue;
     out.push({
+      ...(typeof it.id === "string" && it.id ? { id: it.id } : {}),
       title: typeof it.title === "string" ? it.title.trim() : "",
       body: it.body,
       source: "json",
+      ...(it.scope === "project" || it.scope === "global" ? { scope: it.scope } : {}),
+      ...(typeof it.projectPath === "string" && it.projectPath.trim()
+        ? { projectPath: it.projectPath.trim() }
+        : {}),
+      ...(typeof it.sortOrder === "number" && Number.isFinite(it.sortOrder)
+        ? { sortOrder: it.sortOrder }
+        : {}),
       ...(typeof it.summary === "string" && it.summary.trim()
         ? { summary: it.summary.trim() }
         : {}),
@@ -147,6 +162,10 @@ function parseCsv(text: string): TransferPrompt[] {
   );
   const gi = header.findIndex((h) => h === "tags" || h === "标签" || h === "tag");
   const si = header.findIndex((h) => h === "summary" || h === "摘要");
+  const ii = header.findIndex((h) => h === "id");
+  const ci = header.findIndex((h) => h === "scope" || h === "归属");
+  const pi = header.findIndex((h) => h === "projectpath" || h === "项目路径");
+  const oi = header.findIndex((h) => h === "sortorder" || h === "手动顺序");
   if (ti === -1 && bi === -1 && header.length >= 2) {
     ti = 0;
     bi = 1;
@@ -164,11 +183,18 @@ function parseCsv(text: string): TransferPrompt[] {
       .map((s) => s.trim())
       .filter(Boolean);
     const summary = si >= 0 && si < cells.length ? cells[si]!.trim() : "";
+    const scope = ci >= 0 ? cells[ci]?.trim() : "";
+    const orderText = oi >= 0 ? cells[oi]?.trim() : "";
+    const sortOrder = orderText ? Number(orderText) : undefined;
     out.push({
+      ...(ii >= 0 && cells[ii]?.trim() ? { id: cells[ii]!.trim() } : {}),
       title,
       body,
       tags: tags.length ? tags : undefined,
       ...(summary ? { summary } : {}),
+      ...(scope === "project" || scope === "global" ? { scope } : {}),
+      ...(pi >= 0 && cells[pi]?.trim() ? { projectPath: cells[pi]!.trim() } : {}),
+      ...(typeof sortOrder === "number" && Number.isFinite(sortOrder) ? { sortOrder } : {}),
       source: "csv",
     });
   }
@@ -352,13 +378,17 @@ export function serializeExport(
         mime: "application/json",
         content: JSON.stringify(
           {
-            version: 1,
+            version: 2,
             exportedAt: Date.now(),
             prompts: prompts.map((p) => ({
+              ...(p.id ? { id: p.id } : {}),
               title: p.title,
               body: p.body,
               tags: p.tags,
               ...(p.summary ? { summary: p.summary } : {}),
+              ...(p.scope ? { scope: p.scope } : {}),
+              ...(p.projectPath ? { projectPath: p.projectPath } : {}),
+              ...(typeof p.sortOrder === "number" ? { sortOrder: p.sortOrder } : {}),
             })),
           },
           null,
@@ -366,10 +396,10 @@ export function serializeExport(
         ),
       };
     case "csv": {
-      const lines = ["title,body,tags,summary"];
+      const lines = ["title,body,tags,summary,id,scope,projectPath,sortOrder"];
       for (const p of prompts) {
         lines.push(
-          `${csvEscape(p.title)},${csvEscape(p.body)},${csvEscape((p.tags ?? []).join("|"))},${csvEscape(p.summary ?? "")}`,
+          `${csvEscape(p.title)},${csvEscape(p.body)},${csvEscape((p.tags ?? []).join("|"))},${csvEscape(p.summary ?? "")},${csvEscape(p.id ?? "")},${csvEscape(p.scope ?? "")},${csvEscape(p.projectPath ?? "")},${csvEscape(typeof p.sortOrder === "number" ? String(p.sortOrder) : "")}`,
         );
       }
       // 前置 UTF-8 BOM（\uFEFF），避免 Excel 打开中文 CSV 时乱码

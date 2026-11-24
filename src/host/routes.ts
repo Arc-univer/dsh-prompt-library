@@ -41,7 +41,9 @@ import {
   getSettings,
   importPrompts,
   listPrompts,
+  listPromptProjects,
   listTags,
+  reorderPrompts,
   setMetaValue,
   listTrash,
   recordUsage,
@@ -67,6 +69,7 @@ import {
   updateSessionPrompt,
 } from "./session-prompts.js";
 import { getActiveSessionCwd, listSessionRecords } from "./session-scope.js";
+import { resolveCurrentPromptProject } from "./project-scope.js";
 import { getVersionInfo } from "./update.js";
 import { downloadDir } from "./paths.js";
 
@@ -80,7 +83,7 @@ function json<T>(res: ServerResponse, status: number, body: ApiResponse<T>): voi
 /** 后端导出序列化：与前端 serializeExport 保持一致的输出，供导出写盘使用。 */
 function buildExportFile(
   format: string,
-  prompts: Array<{ title: string; body: string; tags?: string[]; summary?: string }>,
+  prompts: Prompt[],
 ): { fileName: string; content: string } | null {
   const d = new Date();
   const pad = (n: number) => String(n).padStart(2, "0");
@@ -93,13 +96,17 @@ function buildExportFile(
       fileName: `${base}.json`,
       content: JSON.stringify(
         {
-          version: 1,
+          version: 2,
           exportedAt: Date.now(),
           prompts: prompts.map((p) => ({
+            id: p.id,
             title: p.title,
             body: p.body,
             tags: p.tags,
             ...(p.summary ? { summary: p.summary } : {}),
+            scope: p.scope,
+            ...(p.projectPath ? { projectPath: p.projectPath } : {}),
+            sortOrder: p.sortOrder,
           })),
         },
         null,
@@ -108,11 +115,11 @@ function buildExportFile(
     };
   }
   if (format === "csv") {
-    // CSV：新增 summary 列（有摘要的条目填值，无摘要留空）
-    const lines = ["title,body,tags,summary"];
+    // CSV：保留摘要、项目归属与手动顺序列，旧版四列 CSV 仍可正常导入。
+    const lines = ["title,body,tags,summary,id,scope,projectPath,sortOrder"];
     for (const p of prompts) {
       lines.push(
-        `${csvEscape(p.title)},${csvEscape(p.body)},${csvEscape((p.tags ?? []).join("|"))},${csvEscape(p.summary ?? "")}`,
+        `${csvEscape(p.title)},${csvEscape(p.body)},${csvEscape((p.tags ?? []).join("|"))},${csvEscape(p.summary ?? "")},${csvEscape(p.id)},${csvEscape(p.scope)},${csvEscape(p.projectPath ?? "")},${csvEscape(String(p.sortOrder))}`,
       );
     }
     // 前置 UTF-8 BOM（\uFEFF），避免 Excel 打开中文 CSV 时乱码
@@ -388,6 +395,30 @@ export function makePromptRoutes(): WebRoute[] {
         return json(res, 200, { ok: true, data: prompts });
       }
 
+      // GET /projects — 列出有专属提示词的项目，供数据管理筛选与分组。
+      if (method === "GET" && tail === "/projects") {
+        const projects = await listPromptProjects();
+        return json(res, 200, { ok: true, data: projects });
+      }
+
+      // GET /projects/current — 严格按当前会话解析项目，不借用其它会话 cwd。
+      if (method === "GET" && tail === "/projects/current") {
+        const sessionId = new URL(req.url ?? "", "http://localhost").searchParams.get("sessionId") ?? undefined;
+        const project = await resolveCurrentPromptProject(sessionId);
+        return json(res, 200, { ok: true, data: { project } });
+      }
+
+      // PUT /prompts/order — 在 PUT /prompts/:id 前匹配，保存完整手动顺序。
+      if (method === "PUT" && tail === "/prompts/order") {
+        const body = await readJsonBody(req);
+        const raw = typeof body === "object" && body !== null ? (body as { orderedIds?: unknown }) : {};
+        if (!Array.isArray(raw.orderedIds) || raw.orderedIds.some((id) => typeof id !== "string")) {
+          return json(res, 400, { ok: false, error: "invalid body: {orderedIds: string[]}" });
+        }
+        const prompts = await reorderPrompts(raw.orderedIds as string[]);
+        return json(res, 200, { ok: true, data: prompts });
+      }
+
       // POST /prompts — 创建
       if (method === "POST" && segments[0] === "prompts" && segments.length === 1) {
         const body = await readJsonBody(req);
@@ -467,10 +498,7 @@ export function makePromptRoutes(): WebRoute[] {
         const ids = Array.isArray(obj.ids) ? obj.ids.filter((x): x is string => typeof x === "string") : undefined;
         const format = typeof obj.format === "string" ? obj.format : "json";
         const data = await exportPrompts(ids && ids.length > 0 ? ids : undefined);
-        const file = buildExportFile(
-          format,
-          data.prompts.map((p) => ({ title: p.title, body: p.body, tags: p.tags, summary: p.summary })),
-        );
+        const file = buildExportFile(format, data.prompts);
         if (!file) return json(res, 400, { ok: false, error: "bad request" });
         // 目标目录：前端传入的用户选择目录优先，否则回落系统下载目录
         const requested = typeof obj.dir === "string" ? obj.dir.trim() : "";

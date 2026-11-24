@@ -18,13 +18,14 @@ import {
   type CSSProperties,
   type ReactNode,
 } from "react";
-import type { Prompt } from "../../../types.js";
+import type { Prompt, PromptScope } from "../../../types.js";
 import {
   createPrompt as apiCreatePrompt,
   deletePrompt as apiDeletePrompt,
   listPrompts as apiListPrompts,
   listTags as apiListTags,
   polishPrompt as apiPolish,
+  reorderPrompts as apiReorder,
   updatePrompt as apiUpdatePrompt,
 } from "../../utils/api.js";
 import { notifyDataChanged, useDataChanged } from "../../utils/data-sync.js";
@@ -48,6 +49,13 @@ import { PanelHeader } from "../common/PanelHeader.js";
 import { insertVariableAt } from "./TemplateVariables.js";
 import { TagManagePanel } from "./TagManagePanel.js";
 import { RecycleManagePanel } from "./RecycleManagePanel.js";
+import { PromptProjectFilterSelect } from "../common/PromptProjectFilterSelect.js";
+import { PromptSortControls } from "../common/PromptSortControls.js";
+import { PromptDragHandle } from "../common/PromptDragHandle.js";
+import { usePromptProjects } from "../../hooks/usePromptProjects.js";
+import { usePromptSortMode } from "../../hooks/usePromptSortMode.js";
+import { filterPromptsByProject, type PromptProjectFilter } from "../../utils/prompt-projects.js";
+import { mergeVisiblePromptOrder, movePromptToTarget, sortPromptsForMode } from "../../utils/prompt-order.js";
 
 const MONO =
   'var(--dsw-font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Helvetica, Arial, sans-serif)';
@@ -77,6 +85,8 @@ interface Draft {
   title: string;
   body: string;
   tag: string;
+  scope: PromptScope;
+  projectPath: string;
 }
 
 export function LexiconManagerModal(props: {
@@ -89,6 +99,11 @@ export function LexiconManagerModal(props: {
   const T = usePLT(t);
   useThemeSync(); // 订阅宿主主题变化，切换白天/黑夜时刷新主题色
   const TONE = getTone();
+  const { currentProject, projects } = usePromptProjects();
+  const { sortMode, changeSortMode } = usePromptSortMode();
+  const [projectFilter, setProjectFilter] = useState<PromptProjectFilter>("all");
+  const [draggingId, setDraggingId] = useState<string | null>(null);
+  const [orderSaving, setOrderSaving] = useState(false);
   const [maximized, setMaximized] = useState(false);
 
   const [list, setList] = useState<Prompt[]>([]);
@@ -96,14 +111,14 @@ export function LexiconManagerModal(props: {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [tagList, setTagList] = useState<string[]>([]);
   // 左侧列表视图：列表（平铺）/ 分类（按标签分组）
-  const [viewMode, setViewMode] = useState<"list" | "group">("list");
+  const [viewMode, setViewMode] = useState<"list" | "group" | "project">("list");
   // 列表搜索关键词：匹配标题 / 正文 / 标签
   const [search, setSearch] = useState("");
   // 分类视图中折叠的分组标签集合
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
   // 编辑态：null = 未编辑（右侧预览）；{ id: null } = 新建；{ id } = 编辑指定项
   const [editing, setEditing] = useState<{ id: string | null } | null>(null);
-  const [draft, setDraft] = useState<Draft>({ title: "", body: "", tag: "" });
+  const [draft, setDraft] = useState<Draft>({ title: "", body: "", tag: "", scope: "global", projectPath: "" });
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<Msg | null>(null);
   // 操作反馈出现后 2.6 秒自动清除（与导入导出模块一致）
@@ -170,28 +185,45 @@ export function LexiconManagerModal(props: {
     setDataSub(null);
   };
 
-  /** 按搜索关键词过滤：匹配标题 / 正文 / 标签（不区分大小写）。 */
+  /** 先按排序模式和项目范围筛选，再按搜索关键词匹配标题 / 正文 / 标签。 */
+  const orderedList = useMemo(() => sortPromptsForMode(list, sortMode), [list, sortMode]);
+  const scopedList = useMemo(
+    () => filterPromptsByProject(orderedList, projectFilter, currentProject),
+    [orderedList, projectFilter, currentProject],
+  );
   const filtered = useMemo(() => {
     const kw = search.trim().toLowerCase();
-    if (!kw) return list;
-    return list.filter(
+    if (!kw) return scopedList;
+    return scopedList.filter(
       (p) =>
         p.title.toLowerCase().includes(kw) ||
         p.body.toLowerCase().includes(kw) ||
         (p.tags ?? []).some((t) => t.toLowerCase().includes(kw)),
     );
-  }, [list, search]);
+  }, [scopedList, search]);
 
-  /** 按标签分组（分类视图）：无标签条目归入「暂无标签」组。 */
+  /** 分类视图按标签分组；项目视图按归属分组，全局单独作为一组。 */
   const grouped = useMemo(() => {
     const map = new Map<string, Prompt[]>();
     for (const p of filtered) {
-      const key = (p.tags ?? [])[0] ?? "";
+      const key = viewMode === "project"
+        ? p.scope === "global"
+          ? "__global__"
+          : `project:${p.projectKey ?? p.projectPath ?? ""}`
+        : (p.tags ?? [])[0] ?? "";
       if (!map.has(key)) map.set(key, []);
       map.get(key)!.push(p);
     }
     return [...map.entries()];
-  }, [filtered]);
+  }, [filtered, viewMode]);
+
+  const groupLabel = (key: string): string => {
+    if (viewMode !== "project") return key || T("pl.tagsNone");
+    if (key === "__global__") return T("pl.project.global");
+    const projectKey = key.slice("project:".length);
+    const project = projects.find((item) => item.key === projectKey);
+    return project ? `${project.name} — ${project.path}` : T("pl.project.unknown");
+  };
 
   /** 切换分组标签的折叠状态。 */
   const toggleGroup = (key: string): void => {
@@ -266,15 +298,31 @@ export function LexiconManagerModal(props: {
 
   /** 开始新建：清空草稿并进入右侧表单（同时关闭已打开的标签/回收站覆盖层）。 */
   const startCreate = (): void => {
+    const filterProject = projectFilter.startsWith("project:")
+      ? projects.find((project) => project.key === projectFilter.slice("project:".length))
+      : undefined;
+    const defaultProject = filterProject ?? currentProject;
     setEditing({ id: null });
-    setDraft({ title: "", body: "", tag: "" });
+    setDraft({
+      title: "",
+      body: "",
+      tag: "",
+      scope: projectFilter !== "global" && defaultProject ? "project" : "global",
+      projectPath: defaultProject?.path ?? "",
+    });
     setDataSub(null);
   };
 
   /** 开始编辑指定项：用其内容填充草稿。 */
   const startEdit = (p: Prompt): void => {
     setEditing({ id: p.id });
-    setDraft({ title: p.title, body: p.body, tag: (p.tags ?? [])[0] ?? "" });
+    setDraft({
+      title: p.title,
+      body: p.body,
+      tag: (p.tags ?? [])[0] ?? "",
+      scope: p.scope,
+      projectPath: p.projectPath ?? "",
+    });
   };
 
   /** 取消新建/编辑：退出表单；新建取消时同时关闭右侧预览（清空选中）。 */
@@ -312,8 +360,16 @@ export function LexiconManagerModal(props: {
       setMsg({ kind: "error", text: T("pl.requireTitleBody") });
       return;
     }
+    if (draft.scope === "project" && !draft.projectPath.trim()) {
+      setMsg({ kind: "error", text: T("pl.project.pathRequired") });
+      return;
+    }
     setBusy(true);
     const tag = draft.tag ? [draft.tag] : undefined;
+    const ownership = {
+      scope: draft.scope,
+      projectPath: draft.scope === "project" ? draft.projectPath.trim() : undefined,
+    };
     const finish = (): void => {
       setBusy(false);
       setEditing(null);
@@ -321,7 +377,7 @@ export function LexiconManagerModal(props: {
       void load();
     };
     if (editing?.id) {
-      apiUpdatePrompt(editing.id, { title, body, tags: tag }).then(
+      apiUpdatePrompt(editing.id, { title, body, tags: tag, ...ownership }).then(
         () => {
           setMsg({ kind: "ok", text: T("pl.lexicon.saved") });
           finish();
@@ -332,7 +388,7 @@ export function LexiconManagerModal(props: {
         },
       );
     } else {
-      apiCreatePrompt({ title, body, tags: tag }).then(
+      apiCreatePrompt({ title, body, tags: tag, ...ownership }).then(
         (created) => {
           setMsg({ kind: "ok", text: T("pl.lexicon.newDone") });
           setSelectedId(created.id);
@@ -447,6 +503,31 @@ export function LexiconManagerModal(props: {
     );
   }, [viewPolish.status, viewPolishText, viewPolishSummary, selected, busy, resetPolish, T]);
 
+  // 分组、搜索状态下不开放拖拽；项目范围筛选本身允许，隐藏项目会保留相对顺序。
+  const canDrag = sortMode === "manual" && viewMode === "list" && !search.trim() && !orderSaving;
+  const reorder = (sourceId: string, targetId: string): void => {
+    if (!canDrag || sourceId === targetId) return;
+    const previous = list;
+    const nextVisible = movePromptToTarget(filtered, sourceId, targetId);
+    const nextComplete = mergeVisiblePromptOrder(list, nextVisible);
+    setList(nextComplete);
+    setOrderSaving(true);
+    void apiReorder(nextComplete.map((prompt) => prompt.id))
+      .then((updated) => {
+        setList(updated);
+        notifyDataChanged();
+      })
+      .catch((cause: unknown) => {
+        setList(previous);
+        const reason = cause instanceof Error ? cause.message : String(cause);
+        setMsg({ kind: "error", text: `${T("pl.sort.reorderFailed")}：${reason}` });
+      })
+      .finally(() => {
+        setOrderSaving(false);
+        setDraggingId(null);
+      });
+  };
+
   if (!open) return null;
 
   /** 左侧单条提示词（紧凑卡片式列表项）。 */
@@ -457,7 +538,24 @@ export function LexiconManagerModal(props: {
         key={p.id}
         className={active ? "pl-lex-row pl-lex-row--active" : "pl-lex-row"}
         onClick={() => selectItem(p.id)}
+        onDragOver={(event) => {
+          if (!canDrag || !draggingId) return;
+          event.preventDefault();
+          event.dataTransfer.dropEffect = "move";
+        }}
+        onDrop={(event) => {
+          if (!canDrag) return;
+          event.preventDefault();
+          event.stopPropagation();
+          const sourceId = event.dataTransfer.getData("text/plain") || draggingId || "";
+          if (sourceId) reorder(sourceId, p.id);
+        }}
         title={p.title}
+        style={{
+          opacity: draggingId === p.id ? 0.6 : 1,
+          outline: draggingId === p.id ? `1px dashed ${TONE.accent}` : undefined,
+          outlineOffset: -2,
+        }}
       >
         <div
           style={{
@@ -467,6 +565,12 @@ export function LexiconManagerModal(props: {
             minWidth: 0,
           }}
         >
+          {/* 手动模式提供独立拖拽手柄，避免与复选框及文本选择冲突。 */}
+          {canDrag && (
+            <span onClick={(event) => event.stopPropagation()} style={{ display: "inline-flex" }}>
+              <PromptDragHandle promptId={p.id} onStart={setDraggingId} onEnd={() => setDraggingId(null)} />
+            </span>
+          )}
           {/* 多选删除复选框：点击仅切换勾选，不改变右侧预览 */}
           <input
             type="checkbox"
@@ -505,6 +609,7 @@ export function LexiconManagerModal(props: {
               color: TONE.quiet,
             }}
           >
+            {p.scope === "project" ? `${p.projectPath?.replace(/\\/g, "/").split("/").filter(Boolean).pop() || T("pl.project.unknown")} · ` : ""}
             {T("pl.previewUsage", { count: p.usageCount })}
           </span>
         </div>
@@ -1239,6 +1344,44 @@ export function LexiconManagerModal(props: {
             style={inputStyle}
           />
         </div>
+        {/* 项目归属：项目目录移动后可在这里重新关联，全局条目清空项目路径。 */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 4, flexShrink: 0 }}>
+          <span style={{ fontSize: 11.5, fontWeight: 600, color: TONE.text }}>
+            {T("pl.project.scope")}
+          </span>
+          <select
+            value={draft.scope}
+            onChange={(event) => {
+              const scope = event.target.value as PromptScope;
+              setDraft((current) => ({
+                ...current,
+                scope,
+                projectPath: scope === "project" ? (current.projectPath || currentProject?.path || "") : "",
+              }));
+            }}
+            style={inputStyle}
+          >
+            <option value="global">{T("pl.project.scopeGlobal")}</option>
+            <option value="project">{T("pl.project.scopeProject")}</option>
+          </select>
+        </div>
+        {draft.scope === "project" && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 4, flexShrink: 0 }}>
+            <span style={{ fontSize: 11.5, fontWeight: 600, color: TONE.text }}>
+              {T("pl.project.path")}
+            </span>
+            <input
+              value={draft.projectPath}
+              onChange={(event) => setDraft((current) => ({ ...current, projectPath: event.target.value }))}
+              placeholder={T("pl.project.pathPlaceholder")}
+              list="pl-prompt-project-paths"
+              style={inputStyle}
+            />
+            <datalist id="pl-prompt-project-paths">
+              {projects.map((project) => <option key={project.key} value={project.path}>{project.name}</option>)}
+            </datalist>
+          </div>
+        )}
         {/* 标签（单选） */}
         <div
           style={{
@@ -1560,6 +1703,25 @@ export function LexiconManagerModal(props: {
                   >
                     {T("pl.lexicon.groupView")}
                   </button>
+                  <button
+                    type="button"
+                    onClick={() => setViewMode("project")}
+                    style={{
+                      border: "none",
+                      outline: "none",
+                      cursor: "pointer",
+                      fontFamily: MONO,
+                      fontSize: 11.5,
+                      lineHeight: 1.4,
+                      padding: "2px 8px",
+                      borderRadius: 5,
+                      color: viewMode === "project" ? TONE.accent : TONE.quiet,
+                      background: viewMode === "project" ? TONE.accentSoft : "transparent",
+                      transition: "color .18s, background-color .18s",
+                    }}
+                  >
+                    {T("pl.lexicon.projectView")}
+                  </button>
                 </div>
                 {/* 右侧：标签 / 回收站，仅在词库助手独立弹窗（无 container 内嵌）时显示，点击后在右侧覆盖对应子面板 */}
                 {!container && (
@@ -1591,6 +1753,23 @@ export function LexiconManagerModal(props: {
                     >
                       {T("pl.lexicon.viewTrash")}
                     </Button>
+                  </div>
+                )}
+              </div>
+              {/* 项目范围与排序：手动模式的关闭提醒及恢复入口在控件内常驻。 */}
+              <div style={{ display: "flex", flexDirection: "column", alignItems: "stretch", gap: 8, marginTop: 9 }}>
+                <PromptProjectFilterSelect
+                  value={projectFilter}
+                  onChange={setProjectFilter}
+                  currentProject={currentProject}
+                  projects={projects}
+                  allowSpecific
+                  grow
+                />
+                <PromptSortControls mode={sortMode} onChange={changeSortMode} />
+                {sortMode === "manual" && !canDrag && !orderSaving && (
+                  <div style={{ color: TONE.quiet, fontSize: 11, lineHeight: 1.5 }}>
+                    {T("pl.sort.dragFilteredHint")}
                   </div>
                 )}
               </div>
@@ -1788,7 +1967,7 @@ export function LexiconManagerModal(props: {
                 >
                   {T("pl.lexicon.noSearchResult")}
                 </div>
-              ) : viewMode === "group" ? (
+              ) : viewMode !== "list" ? (
                 grouped.map(([tag, items]) => {
                   const isCollapsed = collapsed.has(tag);
                   return (
@@ -1892,7 +2071,7 @@ export function LexiconManagerModal(props: {
                             color: TONE.text,
                           }}
                         >
-                          {tag || T("pl.tagsNone")}
+                          {groupLabel(tag)}
                         </span>
                         {/* 条目数量：与导入导出一致的括号计数 */}
                         <span

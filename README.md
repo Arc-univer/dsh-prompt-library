@@ -22,6 +22,9 @@ DSH (DeepSeek Harness) prompt library plugin: provides **prompt management** and
 ### Prompt Library
 
 - Manage frequently-used prompts (title + body + tags), with search, sorting, tag grouping and usage-count statistics
+- **Project scopes**: save prompts globally or for a specific project. "Current project" shows global prompts plus the current project's prompts; `#` selection and context recommendations never include prompts private to other projects
+- **Manual drag ordering**: switch to manual sort to drag prompts into a persistent order. Turning smart sort off requires confirmation, and the panel keeps a one-click re-enable entry while it is off
+- Data Management supports project filters, project grouping and relinking project paths; JSON / CSV import and export preserve project ownership and manual order
 - Entry 1: the "Library" menu button above the settings button in the sidebar opens a centered panel whose navigation reaches Data Management, Import/Export, Tags and Recycle Bin
 - Entry 2: the prompt-library button beside the chat input opens recent/frequent prompts with one click
 - **Insert**: appends to the existing content in the input box

@@ -9,6 +9,7 @@ import type {
   Prompt,
   PromptInput,
   PromptPatch,
+  PromptProject,
   SessionPrompt,
   TrashItem,
 } from "../../types.js";
@@ -51,6 +52,22 @@ export function listPrompts(): Promise<Prompt[]> {
   return send<Prompt[]>("GET", BASE);
 }
 
+/** 列出所有含专属提示词的项目。 */
+export function listPromptProjects(): Promise<PromptProject[]> {
+  return send<PromptProject[]>("GET", "/api/prompt-library/projects");
+}
+
+/** 严格解析指定会话的当前项目；无法识别时 project 为 null。 */
+export function getCurrentPromptProject(sessionId?: string): Promise<{ project: PromptProject | null }> {
+  const query = sessionId ? `?sessionId=${encodeURIComponent(sessionId)}` : "";
+  return send<{ project: PromptProject | null }>("GET", `/api/prompt-library/projects/current${query}`);
+}
+
+/** 保存包含全部活动提示词的手动顺序，返回带新权重的列表。 */
+export function reorderPrompts(orderedIds: string[]): Promise<Prompt[]> {
+  return send<Prompt[]>("PUT", `${BASE}/order`, { orderedIds });
+}
+
 export function createPrompt(input: PromptInput): Promise<Prompt> {
   return send<Prompt>("POST", BASE, input);
 }
@@ -70,7 +87,8 @@ export function usePrompt(id: string): Promise<Prompt> {
 
 /** 导出全部提示词（备份内容，含 schema 版本与导出时间）。 */
 export interface PromptBackup {
-  version: 1;
+  /** v2 包含项目归属与手动顺序；导入端仍接受 v1。 */
+  version: 2;
   exportedAt: number;
   prompts: Prompt[];
 }

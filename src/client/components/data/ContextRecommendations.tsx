@@ -26,6 +26,8 @@ import {
 } from "../../utils/api.js";
 import { useDataChanged } from "../../utils/data-sync.js";
 import { useConversationTargetSnapshot } from "../../utils/conversation-targets.js";
+import { usePromptProjects } from "../../hooks/usePromptProjects.js";
+import { filterPromptsByProject } from "../../utils/prompt-projects.js";
 import { type PLTranslate, usePLT } from "../../utils/i18n.js";
 import {
   applyVariables,
@@ -165,6 +167,7 @@ export function ContextRecommendations(props: DockProps): ReactNode {
   // 宿主注入的钩子必须在组件顶层调用（不能放进 useMemo）；会话存在时必定注入，
   // 缺失时（理论上不会发生）整个组件不渲染
   const sessionId = useSession?.((s) => s.sessionId);
+  const { currentProject } = usePromptProjects(sessionId);
   // 最新 DSH 的 chat 视图目标在 uiConversation 私有注册表上，旧快照路径仅作回退
   const chatTarget = useConversationTargetSnapshot<{ legacy?: { nodes?: readonly ConversationNode[] } } | undefined>(
     sessionId,
@@ -210,6 +213,12 @@ export function ContextRecommendations(props: DockProps): ReactNode {
     return parts.join("\n").trim();
   }, [draft, userText]);
 
+  // 推荐只允许全局与当前项目提示词，避免其它项目的专有内容串入当前会话。
+  const eligiblePrompts = useMemo(
+    () => filterPromptsByProject(prompts, "current", currentProject),
+    [prompts, currentProject],
+  );
+
   // 依据关键词给每条提示词智能打分，取前 LIMIT 条（最多 5 条；综合相关度 + 使用智能）。
   // 输入框无内容（含新建会话）时不推荐；无任何匹配（相关度为 0）时同样不渲染。
   const hits = useMemo(() => {
@@ -219,13 +228,13 @@ export function ContextRecommendations(props: DockProps): ReactNode {
     const now = Date.now();
     const kw = extractKeywords(keywordText);
     if (kw.size === 0) return [] as Prompt[];
-    return prompts
+    return eligiblePrompts
       .map((p) => ({ p, score: scorePrompt(p, kw, now) }))
       .filter((x) => x.score > 0)
       .sort((a, b) => b.score - a.score)
       .slice(0, LIMIT)
       .map((x) => x.p);
-  }, [enabled, draft, keywordText, prompts]);
+  }, [enabled, draft, keywordText, eligiblePrompts]);
 
   // 推荐命中含 {{变量}} 的提示词时，记录待填充的模板（变量填充弹窗状态）
   const [template, setTemplate] = useState<{ p: Prompt } | null>(null);
