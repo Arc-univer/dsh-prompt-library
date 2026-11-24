@@ -63,18 +63,39 @@ DSH（DeepSeek Harness）词库插件：在聊天栏提供**提示词管理**与
     └── ai-YYYY-MM-DD.log   # AI 调用诊断日志（按日期分文件）
 ```
 
+<<<<<<< HEAD
 ## 安装
 
 ### npm
+=======
+## Installation
+>>>>>>> 1ba901528503ae3251fcb13a75343cb4c8fff34f
 
 ```bash
 dsh plugin --profile web add @sunjuntao/dsh-prompt-library
 ```
 
+<<<<<<< HEAD
 ### GitHub（含 DSH Desktop）
+=======
+### GitHub (including DSH Desktop)
 
-在 DSH Desktop 中选择通过 GitHub 安装，填写你的 fork 仓库地址。仓库必须已经包含编译后的 `lib/` 文件；通过 GitHub 安装不会自动构建 `src/`。
+In DSH Desktop, choose GitHub installation and enter your fork's repository URL. The repository must already contain the compiled `lib/` files; GitHub installation does not build `src/` automatically.
 
+To install a specific tag through the CLI:
+
+```bash
+dsh plugin add github:<owner>/<repository>#v1.1.0
+```
+
+Replace the owner, repository and tag with your own. See the distribution steps below before installing your modified source.
+
+## Usage
+>>>>>>> 1ba901528503ae3251fcb13a75343cb4c8fff34f
+
+Start `dsh web`, click the "Library" menu button above the settings button in the sidebar to reach every feature panel; or use the prompt-library button beside the chat input, type `#` for the quick picker, and click "AI Polish" to polish your input with one click.
+
+<<<<<<< HEAD
 通过 CLI 安装指定标签：
 
 ```bash
@@ -117,6 +138,16 @@ npm run build   # 生成 lib/index.js 与 lib/client.js
 `npm run release` 只会在工作区干净时创建并推送版本标签，不会构建或提交 `lib/`，也不会发布 npm。当前仓库没有自动构建 Release 产物的 GitHub Actions workflow。
 
 ## 效果图
+=======
+## Development / Build
+
+```bash
+npm install
+npm run deploy   # type check + build + sync to DSH (restart dsh web to take effect)
+```
+
+## Screenshots
+>>>>>>> 1ba901528503ae3251fcb13a75343cb4c8fff34f
 
 ![1789779289907](images/README/1789779289907.png)![1789779291686](images/README/1789779291686.png)![1789779294779](images/README/1789779294779.png)
 
